@@ -294,6 +294,254 @@ done:
     return ret;
 }
 
+/* Flatten Okta's nested profile object to top level for each item in the
+ * JSON array. Okta returns user/group attributes under a "profile" sub-object;
+ * this extracts them to the top level so that existing JSON helpers can access
+ * attributes like "login" and "name" directly. */
+static char *okta_flatten_profile_array(TALLOC_CTX *mem_ctx,
+                                        const char *json_in)
+{
+    json_error_t json_error;
+    json_t *array = NULL;
+    json_t *item;
+    json_t *profile;
+    size_t index;
+    const char *key;
+    json_t *val;
+    char *tmp;
+    char *out = NULL;
+
+    array = json_loads(json_in, 0, &json_error);
+    if (array == NULL) {
+        DEBUG(SSSDBG_OP_FAILURE,
+              "Failed to parse json data on line [%d]: [%s].\n",
+              json_error.line, json_error.text);
+        return NULL;
+    }
+
+    if (!json_is_array(array)) {
+        DEBUG(SSSDBG_OP_FAILURE, "Input is not a JSON array.\n");
+        goto done;
+    }
+
+    json_array_foreach(array, index, item) {
+        if (!json_is_object(item)) {
+            continue;
+        }
+
+        profile = json_object_get(item, "profile");
+        if (!json_is_object(profile)) {
+            continue;
+        }
+
+        json_object_foreach(profile, key, val) {
+            /* Only promote if the key is not already at the top level,
+             * to avoid overwriting reserved fields like "id". */
+            if (json_object_get(item, key) == NULL) {
+                json_object_set(item, key, val);
+            }
+        }
+    }
+
+    tmp = json_dumps(array, 0);
+    if (tmp == NULL) {
+        DEBUG(SSSDBG_OP_FAILURE, "json_dumps() failed.\n");
+        goto done;
+    }
+
+    out = talloc_strdup(mem_ctx, tmp);
+    free(tmp);
+    if (out == NULL) {
+        DEBUG(SSSDBG_OP_FAILURE, "talloc_strdup() failed.\n");
+    }
+
+done:
+    json_decref(array);
+    return out;
+}
+
+/* The following function will lookup users and groups based on Okta's
+ * REST API as described in
+ * https://developer.okta.com/docs/reference/api/users/ and
+ * https://developer.okta.com/docs/reference/api/groups/ */
+errno_t okta_lookup(TALLOC_CTX *mem_ctx, enum oidc_cmd oidc_cmd,
+                    char *base_url,
+                    char *input, enum search_str_type input_type,
+                    bool libcurl_debug, const char *ca_db,
+                    const char *client_id, const char *client_secret,
+                    const char *token_endpoint, const char *scope,
+                    const char *bearer_token, struct rest_ctx *rest_ctx,
+                    char **out)
+{
+    errno_t ret;
+    char *uri;
+    char *search_expr;
+    char *search_enc;
+    char *short_name;
+    char *sep;
+    const char *obj_id;
+    char *flat;
+    struct name_and_type_identifier okta_name_and_type_identifier = {
+                            .user_identifier_attr = "login",
+                            .group_identifier_attr = "name",
+                            .user_name_attr = "login",
+                            .group_name_attr = "name" };
+
+    if (base_url == NULL) {
+        DEBUG(SSSDBG_OP_FAILURE, "Missing base URL in IdP type [okta].\n");
+        return EINVAL;
+    }
+
+    switch (oidc_cmd) {
+    case GET_USER:
+    case GET_USER_GROUPS:
+        sep = strrchr(input, '@');
+        if (sep == NULL || sep == input) {
+            /* Short name: search by login prefix */
+            search_expr = talloc_asprintf(rest_ctx,
+                                          "profile.login sw \"%s@\"", input);
+        } else {
+            /* Full login: exact match */
+            search_expr = talloc_asprintf(rest_ctx,
+                                          "profile.login eq \"%s\"", input);
+        }
+        break;
+    case GET_GROUP:
+    case GET_GROUP_MEMBERS:
+        sep = strrchr(input, '@');
+        if (sep == NULL || sep == input) {
+            search_expr = talloc_asprintf(rest_ctx,
+                                          "profile.name eq \"%s\"", input);
+        } else {
+            short_name = talloc_strndup(rest_ctx, input, sep - input);
+            if (short_name == NULL) {
+                DEBUG(SSSDBG_OP_FAILURE,
+                      "Failed to generate short name, using plain input [%s].\n",
+                      input);
+                search_expr = talloc_asprintf(rest_ctx,
+                                              "profile.name eq \"%s\"", input);
+            } else {
+                search_expr = talloc_asprintf(rest_ctx,
+                                              "profile.name eq \"%s\" or "
+                                              "profile.name eq \"%s\"",
+                                              input, short_name);
+            }
+        }
+        break;
+    default:
+        DEBUG(SSSDBG_OP_FAILURE, "Unknown command [%d].\n", oidc_cmd);
+        ret = EINVAL;
+        goto done;
+    }
+
+    if (search_expr == NULL) {
+        DEBUG(SSSDBG_OP_FAILURE, "Failed to create search expression.\n");
+        ret = ENOMEM;
+        goto done;
+    }
+
+    search_enc = url_encode_string(rest_ctx, search_expr);
+    if (search_enc == NULL) {
+        DEBUG(SSSDBG_OP_FAILURE, "Failed to encode search expression.\n");
+        ret = ENOMEM;
+        goto done;
+    }
+
+    switch (oidc_cmd) {
+    case GET_USER:
+    case GET_USER_GROUPS:
+        uri = talloc_asprintf(rest_ctx, "%s/api/v1/users?search=%s",
+                              base_url, search_enc);
+        break;
+    case GET_GROUP:
+    case GET_GROUP_MEMBERS:
+        uri = talloc_asprintf(rest_ctx, "%s/api/v1/groups?search=%s",
+                              base_url, search_enc);
+        break;
+    default:
+        DEBUG(SSSDBG_OP_FAILURE, "Unknown command [%d].\n", oidc_cmd);
+        ret = EINVAL;
+        goto done;
+    }
+
+    if (uri == NULL) {
+        DEBUG(SSSDBG_OP_FAILURE, "Failed to generate lookup URI.\n");
+        ret = ENOMEM;
+        goto done;
+    }
+
+    clean_http_data(rest_ctx);
+    ret = do_http_request(rest_ctx, uri, NULL, bearer_token);
+    if (ret != EOK) {
+        DEBUG(SSSDBG_OP_FAILURE, "Search request failed.\n");
+        goto done;
+    }
+
+    if (oidc_cmd == GET_USER || oidc_cmd == GET_GROUP) {
+        ret = EOK;
+        goto done;
+    }
+
+    obj_id = get_str_attr_from_json_array_string(rest_ctx,
+                                                 get_http_data(rest_ctx),
+                                                 "id");
+    if (obj_id == NULL) {
+        DEBUG(SSSDBG_OP_FAILURE, "Failed to read mandatory object id.\n");
+        ret = EINVAL;
+        goto done;
+    }
+
+    switch (oidc_cmd) {
+    case GET_USER_GROUPS:
+        uri = talloc_asprintf(rest_ctx, "%s/api/v1/users/%s/groups",
+                              base_url, obj_id);
+        break;
+    case GET_GROUP_MEMBERS:
+        uri = talloc_asprintf(rest_ctx, "%s/api/v1/groups/%s/users",
+                              base_url, obj_id);
+        break;
+    default:
+        DEBUG(SSSDBG_OP_FAILURE, "Unknown command [%d].\n", oidc_cmd);
+        ret = EINVAL;
+        goto done;
+    }
+
+    if (uri == NULL) {
+        DEBUG(SSSDBG_OP_FAILURE, "Failed to generate lookup URI.\n");
+        ret = ENOMEM;
+        goto done;
+    }
+
+    clean_http_data(rest_ctx);
+    ret = do_http_request(rest_ctx, uri, NULL, bearer_token);
+    if (ret != EOK) {
+        DEBUG(SSSDBG_OP_FAILURE, "Member(of) search request failed.\n");
+        goto done;
+    }
+
+    ret = EOK;
+
+done:
+    if (ret == EOK && out != NULL) {
+        flat = okta_flatten_profile_array(mem_ctx, get_http_data(rest_ctx));
+        if (flat == NULL) {
+            DEBUG(SSSDBG_OP_FAILURE,
+                  "Failed to flatten Okta profile data.\n");
+            ret = EIO;
+        } else {
+            ret = add_posix_to_json_string_array(mem_ctx,
+                                                 &okta_name_and_type_identifier,
+                                                 '@', flat, out);
+            talloc_free(flat);
+            if (ret != EOK) {
+                DEBUG(SSSDBG_OP_FAILURE, "Failed to add POSIX data.\n");
+            }
+        }
+    }
+
+    return ret;
+}
+
 /* The following function will lookup users and groups based on Keycloak's
  * REST API as described in
  * https://www.keycloak.org/docs-api/latest/rest-api/index.html */
@@ -522,6 +770,11 @@ errno_t oidc_get_id(TALLOC_CTX *mem_ctx, enum oidc_cmd oidc_cmd,
                               libcurl_debug, ca_db, client_id, client_secret,
                               token_endpoint, scope, bearer_token, rest_ctx,
                               out);
+    } else if (idp_type != NULL && strncasecmp(idp_type, "okta:", 5) == 0) {
+        ret = okta_lookup(mem_ctx, oidc_cmd, base_url, input, input_type,
+                          libcurl_debug, ca_db, client_id, client_secret,
+                          token_endpoint, scope, bearer_token, rest_ctx,
+                          out);
     } else if (idp_type == NULL
                || strcasecmp(idp_type, "entra_id") == 0
                || strncasecmp(idp_type, "entra_id:", 9) == 0) {

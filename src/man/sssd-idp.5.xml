@@ -63,8 +63,8 @@
                     <listitem>
                         <para>
                             Required option that specifies the IdP product.
-                            Currently Entra ID (entra_id) and Keycloak
-                            (keycloak) are supported.
+                            Currently Entra ID (entra_id), Keycloak
+                            (keycloak) and Okta (okta) are supported.
                         </para>
                         <para>
                              Depending on the IdP product additional platform
@@ -77,6 +77,9 @@
                              (https://graph.microsoft.com/v1.0). E.g.
                              <quote>entra_id:https://graph.microsoft.us/v1.0</quote>
                              for the US government cloud (GCC High).
+                             For Okta the base URI of the Okta tenant must be
+                             given, e.g.
+                             <quote>okta:https://your-domain.okta.com</quote>.
                         </para>
                         <para>
                             Default: Not set (Required)
@@ -293,6 +296,24 @@ idp_token_endpoint = https://master.keycloak.test:8443/auth/realms/master/protoc
 idp_userinfo_endpoint = https://master.keycloak.test:8443/auth/realms/master/protocol/openid-connect/userinfo
 idp_device_auth_endpoint = https://master.keycloak.test:8443/auth/realms/master/protocol/openid-connect/auth/device
 idp_id_scope = profile
+idp_auth_scope = openid profile email
+</programlisting>
+        </para>
+    </refsect1>
+
+    <refsect1 id='example-okta'>
+        <title>EXAMPLE (Okta)</title>
+        <para>
+<programlisting>
+[domain/okta]
+id_provider = idp
+idp_type = okta:https://your-domain.okta.com
+idp_client_id = YOUR-CLIENT-ID
+idp_client_secret = YOUR-CLIENT-SECRET
+idp_token_endpoint = https://your-domain.okta.com/oauth2/v1/token
+idp_userinfo_endpoint = https://your-domain.okta.com/oauth2/v1/userinfo
+idp_device_auth_endpoint = https://your-domain.okta.com/oauth2/v1/device/authorize
+idp_id_scope = okta.users.read okta.groups.read
 idp_auth_scope = openid profile email
 </programlisting>
         </para>
