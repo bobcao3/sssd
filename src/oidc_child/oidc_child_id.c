@@ -718,7 +718,7 @@ errno_t oidc_get_id(TALLOC_CTX *mem_ctx, enum oidc_cmd oidc_cmd,
                     char *input, enum search_str_type input_type,
                     bool libcurl_debug, const char *ca_db,
                     const char *client_id, const char *client_secret,
-                    const char *private_key_file,
+                    const char *private_key_file, const char *private_key_kid,
                     const char *token_endpoint, const char *scope, char **out)
 {
     errno_t ret;
@@ -750,7 +750,8 @@ errno_t oidc_get_id(TALLOC_CTX *mem_ctx, enum oidc_cmd oidc_cmd,
 
     if (private_key_file != NULL) {
         ret = client_credentials_grant_jwt(rest_ctx, token_endpoint,
-                                           client_id, private_key_file, scope);
+                                           client_id, private_key_file,
+                                           private_key_kid, scope);
     } else {
         ret = client_credentials_grant(rest_ctx, token_endpoint,
                                        client_id, client_secret, scope);

@@ -100,6 +100,7 @@ errno_t set_oidc_extra_args(TALLOC_CTX *mem_ctx, struct idp_id_ctx *idp_id_ctx,
                                idp_id_ctx->client_id,
                                idp_id_ctx->client_secret,
                                idp_id_ctx->private_key_file,
+                               idp_id_ctx->private_key_kid,
                                idp_id_ctx->token_endpoint,
                                idp_id_ctx->scope);
     if (ret != EOK) {

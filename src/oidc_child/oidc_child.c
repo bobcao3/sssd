@@ -346,6 +346,7 @@ struct cli_opts {
     char *client_secret;
     bool client_secret_stdin;
     char *private_key_file;
+    char *private_key_kid;
     char *ca_db;
     char *user_identifier_attr;
     bool libcurl_debug;
@@ -369,6 +370,7 @@ static void free_cli_opts_members(struct cli_opts *opts)
     }
     free(opts->client_secret);
     free(opts->private_key_file);
+    free(opts->private_key_kid);
     free(opts->ca_db);
     free(opts->user_identifier_attr);
     free(opts->search_str);
@@ -422,6 +424,8 @@ static int parse_cli(int argc, const char *argv[], struct cli_opts *opts)
                 _("Read client secret from standard input"), NULL},
         {"private-key-file", 0, POPT_ARG_STRING, &opts->private_key_file, 0,
                 _("Path to PEM private key file for private_key_jwt auth"), NULL},
+        {"private-key-kid", 0, POPT_ARG_STRING, &opts->private_key_kid, 0,
+                _("Key ID (kid) to include in JWT header for private_key_jwt auth"), NULL},
         {"idp-type", 0, POPT_ARG_STRING, &opts->idp_type, 0,
                 _("Type of the IdP (entra_id, keycloak etc)"), NULL},
         {"name", 0, POPT_ARG_STRING, &tmp_name, 0, _("Name of user or group"),
@@ -653,7 +657,7 @@ int main(int argc, const char *argv[])
                           opts.search_str, opts.search_str_type,
                           opts.libcurl_debug, opts.ca_db,
                           opts.client_id, opts.client_secret,
-                          opts.private_key_file,
+                          opts.private_key_file, opts.private_key_kid,
                           opts.token_endpoint, opts.scope, &out);
         if (ret != EOK) {
             DEBUG(SSSDBG_OP_FAILURE, "Id lookup failed.\n");

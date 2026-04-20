@@ -861,7 +861,8 @@ done:
 static char *build_private_key_jwt(TALLOC_CTX *mem_ctx,
                                     const char *client_id,
                                     const char *token_endpoint,
-                                    const char *key_file)
+                                    const char *key_file,
+                                    const char *kid)
 {
     EVP_PKEY *pkey = NULL;
     EVP_MD_CTX *md_ctx = NULL;
@@ -920,8 +921,11 @@ static char *build_private_key_jwt(TALLOC_CTX *mem_ctx,
 
     now = time(NULL);
 
-    header_json = talloc_asprintf(mem_ctx, "{\"alg\":\"%s\",\"typ\":\"JWT\"}",
-                                  alg);
+    header_json = (kid != NULL)
+        ? talloc_asprintf(mem_ctx,
+                          "{\"alg\":\"%s\",\"typ\":\"JWT\",\"kid\":\"%s\"}",
+                          alg, kid)
+        : talloc_asprintf(mem_ctx, "{\"alg\":\"%s\",\"typ\":\"JWT\"}", alg);
     if (header_json == NULL) {
         DEBUG(SSSDBG_OP_FAILURE, "talloc_asprintf failed for JWT header.\n");
         goto done;
@@ -1021,6 +1025,7 @@ errno_t client_credentials_grant_jwt(struct rest_ctx *rest_ctx,
                                      const char *token_endpoint,
                                      const char *client_id,
                                      const char *private_key_file,
+                                     const char *kid,
                                      const char *scope)
 {
     int ret;
@@ -1028,7 +1033,7 @@ errno_t client_credentials_grant_jwt(struct rest_ctx *rest_ctx,
     char *jwt = NULL;
 
     jwt = build_private_key_jwt(rest_ctx, client_id, token_endpoint,
-                                private_key_file);
+                                private_key_file, kid);
     if (jwt == NULL) {
         DEBUG(SSSDBG_OP_FAILURE, "Failed to build private_key_jwt.\n");
         ret = EIO;

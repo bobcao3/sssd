@@ -30,6 +30,7 @@ struct dp_option default_idp_opts[] = {
     { "idp_client_id", DP_OPT_STRING, NULL_STRING, NULL_STRING },
     { CONFDB_IDP_CLIENT_SECRET, DP_OPT_STRING, NULL_STRING, NULL_STRING },
     { "idp_private_key_file", DP_OPT_STRING, NULL_STRING, NULL_STRING },
+    { "idp_private_key_kid", DP_OPT_STRING, NULL_STRING, NULL_STRING },
     { "idp_token_endpoint", DP_OPT_STRING, NULL_STRING, NULL_STRING },
     { "idp_device_auth_endpoint", DP_OPT_STRING, NULL_STRING, NULL_STRING },
     { "idp_userinfo_endpoint", DP_OPT_STRING, NULL_STRING, NULL_STRING },

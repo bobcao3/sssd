@@ -41,6 +41,7 @@ struct idp_init_ctx {
     const char *client_id;
     const char *client_secret;
     const char *private_key_file;
+    const char *private_key_kid;
     const char *token_endpoint;
     const char *scope;
 };
@@ -127,6 +128,8 @@ errno_t sssm_idp_init(TALLOC_CTX *mem_ctx,
                                                  IDP_CLIENT_SECRET);
     init_ctx->private_key_file = dp_opt_get_cstring(init_ctx->opts,
                                                     IDP_PRIVATE_KEY_FILE);
+    init_ctx->private_key_kid = dp_opt_get_cstring(init_ctx->opts,
+                                                   IDP_PRIVATE_KEY_KID);
 
     if (init_ctx->client_secret == NULL && init_ctx->private_key_file == NULL) {
         DEBUG(SSSDBG_CRIT_FAILURE,
@@ -260,6 +263,7 @@ errno_t sssm_idp_id_init(TALLOC_CTX *mem_ctx,
     id_ctx->client_id = init_ctx->client_id;
     id_ctx->client_secret = init_ctx->client_secret;
     id_ctx->private_key_file = init_ctx->private_key_file;
+    id_ctx->private_key_kid = init_ctx->private_key_kid;
     id_ctx->token_endpoint = init_ctx->token_endpoint;
     id_ctx->scope = init_ctx->scope;
 
