@@ -38,6 +38,8 @@ struct idp_auth_ctx {
     const char *idp_type;
     const char *client_id;
     const char *client_secret;
+    const char *private_key_file;
+    const char *private_key_kid;
     const char *token_endpoint;
     const char *device_auth_endpoint;
     const char *userinfo_endpoint;

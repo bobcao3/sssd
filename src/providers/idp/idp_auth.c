@@ -77,8 +77,8 @@ set_oidc_auth_extra_args(TALLOC_CTX *mem_ctx, struct idp_auth_ctx *idp_auth_ctx,
                                idp_auth_ctx->idp_type,
                                idp_auth_ctx->client_id,
                                idp_auth_ctx->client_secret,
-                               NULL,
-                               NULL,
+                               idp_auth_ctx->private_key_file,
+                               idp_auth_ctx->private_key_kid,
                                idp_auth_ctx->token_endpoint,
                                idp_auth_ctx->scope);
     if (ret != EOK) {

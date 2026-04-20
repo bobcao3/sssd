@@ -355,6 +355,8 @@ errno_t sssm_idp_auth_init(TALLOC_CTX *mem_ctx,
     auth_ctx->idp_type = init_ctx->idp_type;
     auth_ctx->client_id = init_ctx->client_id;
     auth_ctx->client_secret = init_ctx->client_secret;
+    auth_ctx->private_key_file = init_ctx->private_key_file;
+    auth_ctx->private_key_kid = init_ctx->private_key_kid;
     auth_ctx->token_endpoint = init_ctx->token_endpoint;
 
     auth_ctx->open_request_table = sss_ptr_hash_create(auth_ctx, NULL, NULL);
