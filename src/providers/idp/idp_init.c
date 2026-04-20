@@ -40,6 +40,7 @@ struct idp_init_ctx {
     const char *idp_type;
     const char *client_id;
     const char *client_secret;
+    const char *private_key_file;
     const char *token_endpoint;
     const char *scope;
 };
@@ -124,9 +125,13 @@ errno_t sssm_idp_init(TALLOC_CTX *mem_ctx,
 
     init_ctx->client_secret = dp_opt_get_cstring(init_ctx->opts,
                                                  IDP_CLIENT_SECRET);
-    if (init_ctx->client_secret == NULL) {
+    init_ctx->private_key_file = dp_opt_get_cstring(init_ctx->opts,
+                                                    IDP_PRIVATE_KEY_FILE);
+
+    if (init_ctx->client_secret == NULL && init_ctx->private_key_file == NULL) {
         DEBUG(SSSDBG_CRIT_FAILURE,
-              "Missing required option '"CONFDB_IDP_CLIENT_SECRET"'.\n");
+              "One of '"CONFDB_IDP_CLIENT_SECRET"' or "
+              "'idp_private_key_file' must be set.\n");
         ret = EINVAL;
         goto done;
     }
@@ -254,6 +259,7 @@ errno_t sssm_idp_id_init(TALLOC_CTX *mem_ctx,
     id_ctx->idp_type = init_ctx->idp_type;
     id_ctx->client_id = init_ctx->client_id;
     id_ctx->client_secret = init_ctx->client_secret;
+    id_ctx->private_key_file = init_ctx->private_key_file;
     id_ctx->token_endpoint = init_ctx->token_endpoint;
     id_ctx->scope = init_ctx->scope;
 

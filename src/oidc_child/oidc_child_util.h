@@ -126,6 +126,12 @@ errno_t client_credentials_grant(struct rest_ctx *rest_ctx,
                                  const char *client_secret,
                                  const char *scope);
 
+errno_t client_credentials_grant_jwt(struct rest_ctx *rest_ctx,
+                                     const char *token_endpoint,
+                                     const char *client_id,
+                                     const char *private_key_file,
+                                     const char *scope);
+
 errno_t do_http_request(struct rest_ctx *rest_ctx, const char *uri,
                         const char *post_data, const char *token);
 
@@ -188,6 +194,7 @@ errno_t oidc_get_id(TALLOC_CTX *mem_ctx, enum oidc_cmd oidc_cmd,
                     char *input, enum search_str_type input_type,
                     bool libcurl_debug, const char *ca_db,
                     const char *client_id, const char *client_secret,
+                    const char *private_key_file,
                     const char *token_endpoint, const char *scope, char **out);
 
 #endif /* __OIDC_CHILD_UTIL_H__ */

@@ -37,6 +37,7 @@ enum idp_opts {
     IDP_TYPE,
     IDP_CLIENT_ID,
     IDP_CLIENT_SECRET,
+    IDP_PRIVATE_KEY_FILE,
     IDP_TOKEN_ENDPOINT,
     IDP_DEVICE_AUTH_ENDPOINT,
     IDP_USERINFO_ENDPOINT,
@@ -82,6 +83,7 @@ errno_t set_oidc_common_args(const char **extra_args, size_t *c,
                              const char *idp_type,
                              const char *client_id,
                              const char *client_secret,
+                             const char *private_key_file,
                              const char *token_endpoint,
                              const char *scope);
 #endif /* __IDP_COMMON_H__ */

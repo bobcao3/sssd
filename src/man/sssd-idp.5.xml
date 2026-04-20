@@ -117,6 +117,33 @@
                     </listitem>
                 </varlistentry>
                 <varlistentry>
+                    <term>idp_private_key_file (string)</term>
+                    <listitem>
+                        <para>
+                            Path to a PEM file containing an RSA private key
+                            used for <quote>private_key_jwt</quote> client
+                            authentication (RFC 7523). When set, SSSD uses
+                            this key to sign a JWT assertion instead of
+                            sending <quote>idp_client_secret</quote> to the
+                            token endpoint. The corresponding public key must
+                            be registered with the IdP application.
+                        </para>
+                        <para>
+                            This is required for Okta, whose Org Authorization
+                            Server mandates <quote>private_key_jwt</quote> for
+                            Client Credentials grants to the management API.
+                        </para>
+                        <para>
+                            When <quote>idp_private_key_file</quote> is set,
+                            <quote>idp_client_secret</quote> is not required
+                            for <quote>id_provider</quote> lookups.
+                        </para>
+                        <para>
+                            Default: Not set
+                        </para>
+                    </listitem>
+                </varlistentry>
+                <varlistentry>
                     <term>idp_token_endpoint (string)</term>
                     <listitem>
                         <para>
@@ -309,7 +336,7 @@ idp_auth_scope = openid profile email
 id_provider = idp
 idp_type = okta:https://your-domain.okta.com
 idp_client_id = YOUR-CLIENT-ID
-idp_client_secret = YOUR-CLIENT-SECRET
+idp_private_key_file = /etc/sssd/okta_private_key.pem
 idp_token_endpoint = https://your-domain.okta.com/oauth2/v1/token
 idp_userinfo_endpoint = https://your-domain.okta.com/oauth2/v1/userinfo
 idp_device_auth_endpoint = https://your-domain.okta.com/oauth2/v1/device/authorize

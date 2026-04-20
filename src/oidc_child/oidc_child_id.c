@@ -718,6 +718,7 @@ errno_t oidc_get_id(TALLOC_CTX *mem_ctx, enum oidc_cmd oidc_cmd,
                     char *input, enum search_str_type input_type,
                     bool libcurl_debug, const char *ca_db,
                     const char *client_id, const char *client_secret,
+                    const char *private_key_file,
                     const char *token_endpoint, const char *scope, char **out)
 {
     errno_t ret;
@@ -730,9 +731,14 @@ errno_t oidc_get_id(TALLOC_CTX *mem_ctx, enum oidc_cmd oidc_cmd,
         return EINVAL;
     }
 
-    if (client_id == NULL || client_secret == NULL || token_endpoint == NULL
-            || input == NULL) {
+    if (client_id == NULL || token_endpoint == NULL || input == NULL) {
         DEBUG(SSSDBG_CRIT_FAILURE, "Missing required argument.\n");
+        return EINVAL;
+    }
+
+    if (client_secret == NULL && private_key_file == NULL) {
+        DEBUG(SSSDBG_CRIT_FAILURE,
+              "One of client_secret or private_key_file must be provided.\n");
         return EINVAL;
     }
 
@@ -742,8 +748,13 @@ errno_t oidc_get_id(TALLOC_CTX *mem_ctx, enum oidc_cmd oidc_cmd,
         return ENOMEM;
     }
 
-    ret = client_credentials_grant(rest_ctx, token_endpoint,
-                                   client_id, client_secret, scope);
+    if (private_key_file != NULL) {
+        ret = client_credentials_grant_jwt(rest_ctx, token_endpoint,
+                                           client_id, private_key_file, scope);
+    } else {
+        ret = client_credentials_grant(rest_ctx, token_endpoint,
+                                       client_id, client_secret, scope);
+    }
     if (ret != EOK) {
         DEBUG(SSSDBG_OP_FAILURE,
               "Failed to get access token with client credentials grant.\n");

@@ -228,6 +228,7 @@ errno_t set_oidc_common_args(const char **extra_args, size_t *c,
                              const char *idp_type,
                              const char *client_id,
                              const char *client_secret,
+                             const char *private_key_file,
                              const char *token_endpoint,
                              const char *scope)
 {
@@ -253,7 +254,17 @@ errno_t set_oidc_common_args(const char **extra_args, size_t *c,
     }
     (*c)++;
 
-    if (client_secret != NULL) {
+    if (private_key_file != NULL) {
+        extra_args[*c] = talloc_asprintf(extra_args,
+                                         "--private-key-file=%s",
+                                         private_key_file);
+        if (extra_args[*c] == NULL) {
+            DEBUG(SSSDBG_OP_FAILURE, "talloc_asprintf failed.\n");
+            ret = ENOMEM;
+            goto done;
+        }
+        (*c)++;
+    } else if (client_secret != NULL) {
         extra_args[*c] = talloc_strdup(extra_args,
                                        "--client-secret-stdin");
         if (extra_args[*c] == NULL) {

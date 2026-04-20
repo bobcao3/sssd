@@ -24,6 +24,12 @@
 */
 
 #include <curl/curl.h>
+#include <openssl/evp.h>
+#include <openssl/pem.h>
+#include <openssl/rand.h>
+#include <openssl/bio.h>
+#include <openssl/buffer.h>
+#include <time.h>
 #include "util/memory_erase.h"
 #include "oidc_child/oidc_child_util.h"
 
@@ -793,6 +799,291 @@ errno_t client_credentials_grant(struct rest_ctx *rest_ctx,
 
 done:
     talloc_free(post_data);
+    return ret;
+}
+
+/* Base64url-encode raw bytes (no padding, url-safe alphabet). */
+static char *base64url_encode(TALLOC_CTX *mem_ctx,
+                               const unsigned char *data, size_t len)
+{
+    BIO *b64_bio = NULL;
+    BIO *mem_bio = NULL;
+    BUF_MEM *mem_buf;
+    char *out = NULL;
+    char *p;
+
+    b64_bio = BIO_new(BIO_f_base64());
+    if (b64_bio == NULL) {
+        DEBUG(SSSDBG_OP_FAILURE, "BIO_new(BIO_f_base64) failed.\n");
+        goto done;
+    }
+
+    mem_bio = BIO_new(BIO_s_mem());
+    if (mem_bio == NULL) {
+        DEBUG(SSSDBG_OP_FAILURE, "BIO_new(BIO_s_mem) failed.\n");
+        goto done;
+    }
+
+    BIO_set_flags(b64_bio, BIO_FLAGS_BASE64_NO_NL);
+    BIO_push(b64_bio, mem_bio);
+
+    if (BIO_write(b64_bio, data, (int) len) != (int) len) {
+        DEBUG(SSSDBG_OP_FAILURE, "BIO_write failed.\n");
+        goto done;
+    }
+    if (BIO_flush(b64_bio) != 1) {
+        DEBUG(SSSDBG_OP_FAILURE, "BIO_flush failed.\n");
+        goto done;
+    }
+
+    BIO_get_mem_ptr(mem_bio, &mem_buf);
+    out = talloc_strndup(mem_ctx, mem_buf->data, mem_buf->length);
+    if (out == NULL) {
+        DEBUG(SSSDBG_OP_FAILURE, "talloc_strndup failed.\n");
+        goto done;
+    }
+
+    /* Convert to base64url: + -> -, / -> _, strip = padding */
+    for (p = out; *p != '\0'; p++) {
+        if (*p == '+') *p = '-';
+        else if (*p == '/') *p = '_';
+        else if (*p == '=') { *p = '\0'; break; }
+    }
+
+done:
+    /* mem_bio is owned by b64_bio after BIO_push */
+    if (b64_bio != NULL) BIO_free_all(b64_bio);
+    return out;
+}
+
+/* Build a signed JWT for private_key_jwt client authentication (RFC 7523).
+ * Supports RSA keys (RS256). The key file must be a PEM private key. */
+static char *build_private_key_jwt(TALLOC_CTX *mem_ctx,
+                                    const char *client_id,
+                                    const char *token_endpoint,
+                                    const char *key_file)
+{
+    EVP_PKEY *pkey = NULL;
+    EVP_MD_CTX *md_ctx = NULL;
+    FILE *fp = NULL;
+    char *header_b64 = NULL;
+    char *payload_b64 = NULL;
+    char *signing_input = NULL;
+    unsigned char *sig = NULL;
+    size_t sig_len = 0;
+    char *sig_b64 = NULL;
+    char *jwt = NULL;
+    unsigned char jti_raw[16];
+    char jti[33];
+    time_t now;
+    const char *alg;
+    char *header_json = NULL;
+    char *payload_json = NULL;
+    int key_type;
+    int i;
+
+    fp = fopen(key_file, "r");
+    if (fp == NULL) {
+        DEBUG(SSSDBG_OP_FAILURE,
+              "Failed to open private key file [%s]: [%d][%s].\n",
+              key_file, errno, strerror(errno));
+        goto done;
+    }
+
+    pkey = PEM_read_PrivateKey(fp, NULL, NULL, NULL);
+    fclose(fp);
+    fp = NULL;
+    if (pkey == NULL) {
+        DEBUG(SSSDBG_OP_FAILURE,
+              "Failed to read private key from [%s].\n", key_file);
+        goto done;
+    }
+
+    key_type = EVP_PKEY_base_id(pkey);
+    if (key_type == EVP_PKEY_RSA) {
+        alg = "RS256";
+    } else {
+        DEBUG(SSSDBG_OP_FAILURE,
+              "Unsupported key type [%d]; only RSA keys are supported.\n",
+              key_type);
+        goto done;
+    }
+
+    /* Generate a random JTI */
+    if (RAND_bytes(jti_raw, sizeof(jti_raw)) != 1) {
+        DEBUG(SSSDBG_OP_FAILURE, "Failed to generate random JTI.\n");
+        goto done;
+    }
+    for (i = 0; i < 16; i++) {
+        snprintf(jti + i * 2, 3, "%02x", jti_raw[i]);
+    }
+
+    now = time(NULL);
+
+    header_json = talloc_asprintf(mem_ctx, "{\"alg\":\"%s\",\"typ\":\"JWT\"}",
+                                  alg);
+    if (header_json == NULL) {
+        DEBUG(SSSDBG_OP_FAILURE, "talloc_asprintf failed for JWT header.\n");
+        goto done;
+    }
+
+    payload_json = talloc_asprintf(mem_ctx,
+        "{\"iss\":\"%s\",\"sub\":\"%s\",\"aud\":\"%s\","
+        "\"iat\":%ld,\"exp\":%ld,\"jti\":\"%s\"}",
+        client_id, client_id, token_endpoint,
+        (long) now, (long) (now + 300), jti);
+    if (payload_json == NULL) {
+        DEBUG(SSSDBG_OP_FAILURE, "talloc_asprintf failed for JWT payload.\n");
+        goto done;
+    }
+
+    header_b64 = base64url_encode(mem_ctx,
+                                   (unsigned char *) header_json,
+                                   strlen(header_json));
+    if (header_b64 == NULL) {
+        DEBUG(SSSDBG_OP_FAILURE, "Failed to base64url-encode JWT header.\n");
+        goto done;
+    }
+
+    payload_b64 = base64url_encode(mem_ctx,
+                                    (unsigned char *) payload_json,
+                                    strlen(payload_json));
+    if (payload_b64 == NULL) {
+        DEBUG(SSSDBG_OP_FAILURE, "Failed to base64url-encode JWT payload.\n");
+        goto done;
+    }
+
+    signing_input = talloc_asprintf(mem_ctx, "%s.%s", header_b64, payload_b64);
+    if (signing_input == NULL) {
+        DEBUG(SSSDBG_OP_FAILURE, "talloc_asprintf failed for signing input.\n");
+        goto done;
+    }
+
+    md_ctx = EVP_MD_CTX_new();
+    if (md_ctx == NULL) {
+        DEBUG(SSSDBG_OP_FAILURE, "EVP_MD_CTX_new failed.\n");
+        goto done;
+    }
+
+    if (EVP_DigestSignInit(md_ctx, NULL, EVP_sha256(), NULL, pkey) != 1) {
+        DEBUG(SSSDBG_OP_FAILURE, "EVP_DigestSignInit failed.\n");
+        goto done;
+    }
+
+    if (EVP_DigestSignUpdate(md_ctx, signing_input, strlen(signing_input)) != 1) {
+        DEBUG(SSSDBG_OP_FAILURE, "EVP_DigestSignUpdate failed.\n");
+        goto done;
+    }
+
+    if (EVP_DigestSignFinal(md_ctx, NULL, &sig_len) != 1) {
+        DEBUG(SSSDBG_OP_FAILURE,
+              "EVP_DigestSignFinal (length query) failed.\n");
+        goto done;
+    }
+
+    sig = talloc_size(mem_ctx, sig_len);
+    if (sig == NULL) {
+        DEBUG(SSSDBG_OP_FAILURE, "Failed to allocate signature buffer.\n");
+        goto done;
+    }
+
+    if (EVP_DigestSignFinal(md_ctx, sig, &sig_len) != 1) {
+        DEBUG(SSSDBG_OP_FAILURE, "EVP_DigestSignFinal failed.\n");
+        talloc_free(sig);
+        sig = NULL;
+        goto done;
+    }
+
+    sig_b64 = base64url_encode(mem_ctx, sig, sig_len);
+    if (sig_b64 == NULL) {
+        DEBUG(SSSDBG_OP_FAILURE, "Failed to base64url-encode signature.\n");
+        goto done;
+    }
+
+    jwt = talloc_asprintf(mem_ctx, "%s.%s", signing_input, sig_b64);
+    if (jwt == NULL) {
+        DEBUG(SSSDBG_OP_FAILURE, "talloc_asprintf failed for JWT.\n");
+    }
+
+done:
+    if (sig != NULL) {
+        sss_erase_mem_securely(sig, sig_len);
+        talloc_free(sig);
+    }
+    if (pkey != NULL) EVP_PKEY_free(pkey);
+    if (md_ctx != NULL) EVP_MD_CTX_free(md_ctx);
+    talloc_free(header_json);
+    talloc_free(payload_json);
+    return jwt;
+}
+
+errno_t client_credentials_grant_jwt(struct rest_ctx *rest_ctx,
+                                     const char *token_endpoint,
+                                     const char *client_id,
+                                     const char *private_key_file,
+                                     const char *scope)
+{
+    int ret;
+    char *post_data = NULL;
+    char *jwt = NULL;
+
+    jwt = build_private_key_jwt(rest_ctx, client_id, token_endpoint,
+                                private_key_file);
+    if (jwt == NULL) {
+        DEBUG(SSSDBG_OP_FAILURE, "Failed to build private_key_jwt.\n");
+        ret = EIO;
+        goto done;
+    }
+
+    post_data = talloc_strdup(rest_ctx, "grant_type=client_credentials");
+    if (post_data == NULL) {
+        ret = ENOMEM;
+        goto done;
+    }
+
+    post_data = append_to_post_data(post_data, "client_id", client_id);
+    if (post_data == NULL) {
+        DEBUG(SSSDBG_OP_FAILURE, "Failed to add client_id to POST data.\n");
+        ret = ENOMEM;
+        goto done;
+    }
+
+    if (scope != NULL) {
+        post_data = append_to_post_data(post_data, "scope", scope);
+        if (post_data == NULL) {
+            DEBUG(SSSDBG_OP_FAILURE, "Failed to add scope to POST data.\n");
+            ret = ENOMEM;
+            goto done;
+        }
+    }
+
+    post_data = append_to_post_data(post_data, "client_assertion_type",
+        "urn:ietf:params:oauth:client-assertion-type:jwt-bearer");
+    if (post_data == NULL) {
+        DEBUG(SSSDBG_OP_FAILURE,
+              "Failed to add client_assertion_type to POST data.\n");
+        ret = ENOMEM;
+        goto done;
+    }
+
+    post_data = append_to_post_data(post_data, "client_assertion", jwt);
+    if (post_data == NULL) {
+        DEBUG(SSSDBG_OP_FAILURE,
+              "Failed to add client_assertion to POST data.\n");
+        ret = ENOMEM;
+        goto done;
+    }
+
+    clean_http_data(rest_ctx);
+    ret = do_http_request(rest_ctx, token_endpoint, post_data, NULL);
+    if (ret != EOK) {
+        DEBUG(SSSDBG_OP_FAILURE,
+              "Failed to send client credentials JWT request.\n");
+    }
+
+done:
+    talloc_free(post_data);
+    talloc_free(jwt);
     return ret;
 }
 
