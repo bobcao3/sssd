@@ -421,6 +421,8 @@ static errno_t do_http_request_ext(struct rest_ctx *rest_ctx, const char *uri,
     if (resp_code != 200) {
         DEBUG(SSSDBG_OP_FAILURE, "Request failed, response code is [%ld].\n",
                                  resp_code);
+        DEBUG(SSSDBG_OP_FAILURE, "Error response body: [%s].\n",
+                                 get_http_data(rest_ctx));
         ret = EIO;
         goto done;
     }
@@ -485,6 +487,8 @@ errno_t do_http_request(struct rest_ctx *rest_ctx, const char *uri,
     if (resp_code != 200) {
         DEBUG(SSSDBG_OP_FAILURE, "Request failed, response code is [%ld].\n",
                                  resp_code);
+        DEBUG(SSSDBG_OP_FAILURE, "Error response body: [%s].\n",
+                                 get_http_data(rest_ctx));
         ret = EIO;
         goto done;
     }
