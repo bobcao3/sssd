@@ -384,7 +384,7 @@ errno_t okta_lookup(TALLOC_CTX *mem_ctx, enum oidc_cmd oidc_cmd,
     struct name_and_type_identifier okta_name_and_type_identifier = {
                             .user_identifier_attr = "login",
                             .group_identifier_attr = "name",
-                            .user_name_attr = "login",
+                            .user_name_attr = "UnixUserName",
                             .group_name_attr = "name" };
 
     if (base_url == NULL) {
