@@ -4938,6 +4938,7 @@ oidc_child_LDADD = \
     $(JANSSON_LIBS) \
     $(JOSE_LIBS) \
     $(CURL_LIBS) \
+    $(CRYPTO_LIBS) \
     $(NULL)
 endif
 
