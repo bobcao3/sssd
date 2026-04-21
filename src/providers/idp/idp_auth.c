@@ -183,10 +183,13 @@ static const char *get_stored_request_data(TALLOC_CTX *mem_ctx,
         goto done;
     }
 
-    send_data = talloc_asprintf(mem_ctx, "%s\n%s",
-                                dp_opt_get_cstring(idp_auth_ctx->idp_options,
-                                                   IDP_CLIENT_SECRET),
-                                open_req->device_code_data);
+    if (idp_auth_ctx->client_secret != NULL) {
+        send_data = talloc_asprintf(mem_ctx, "%s\n%s",
+                                    idp_auth_ctx->client_secret,
+                                    open_req->device_code_data);
+    } else {
+        send_data = talloc_strdup(mem_ctx, open_req->device_code_data);
+    }
     if (send_data == NULL) {
         DEBUG(SSSDBG_OP_FAILURE, "Failed to generate auth data.\n");
         goto done;
