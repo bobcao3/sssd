@@ -353,11 +353,24 @@ errno_t sssm_idp_auth_init(TALLOC_CTX *mem_ctx,
     auth_ctx->idp_options = init_ctx->opts;
 
     auth_ctx->idp_type = init_ctx->idp_type;
-    auth_ctx->client_id = init_ctx->client_id;
-    auth_ctx->client_secret = init_ctx->client_secret;
-    auth_ctx->private_key_file = init_ctx->private_key_file;
-    auth_ctx->private_key_kid = init_ctx->private_key_kid;
     auth_ctx->token_endpoint = init_ctx->token_endpoint;
+
+    /* Use idp_auth_client_id/secret if set, otherwise fall back to the main
+     * client credentials. The auth client is typically a Native app that
+     * supports device authorization but needs no client secret (public client),
+     * while the main client is an API Services app used for id lookups. */
+    auth_ctx->client_id = dp_opt_get_cstring(init_ctx->opts, IDP_AUTH_CLIENT_ID);
+    if (auth_ctx->client_id != NULL) {
+        auth_ctx->client_secret = dp_opt_get_cstring(init_ctx->opts,
+                                                     IDP_AUTH_CLIENT_SECRET);
+        auth_ctx->private_key_file = NULL;
+        auth_ctx->private_key_kid = NULL;
+    } else {
+        auth_ctx->client_id = init_ctx->client_id;
+        auth_ctx->client_secret = init_ctx->client_secret;
+        auth_ctx->private_key_file = init_ctx->private_key_file;
+        auth_ctx->private_key_kid = init_ctx->private_key_kid;
+    }
 
     auth_ctx->open_request_table = sss_ptr_hash_create(auth_ctx, NULL, NULL);
     if (auth_ctx->open_request_table == NULL) {
