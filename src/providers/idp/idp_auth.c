@@ -111,6 +111,12 @@ set_oidc_auth_extra_args(TALLOC_CTX *mem_ctx, struct idp_auth_ctx *idp_auth_ctx,
         /* Keycloak is using the 'id' attribute as 'sub' for OIDC */
         extra_args[c] = talloc_strdup(extra_args,
                                       "--user-identifier-attribute=sub");
+    } else if (idp_auth_ctx->idp_type != NULL
+               && strncasecmp(idp_auth_ctx->idp_type, "okta:", 5) == 0) {
+        /* Okta puts the user ID in the 'uid' JWT claim; 'sub' in access
+         * tokens is the login email, which does not match the SSSD UUID. */
+        extra_args[c] = talloc_strdup(extra_args,
+                                      "--user-identifier-attribute=uid");
     } else {
         extra_args[c] = talloc_strdup(extra_args,
                                       "--user-identifier-attribute=id");
