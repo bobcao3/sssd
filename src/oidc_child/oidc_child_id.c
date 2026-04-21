@@ -397,9 +397,10 @@ errno_t okta_lookup(TALLOC_CTX *mem_ctx, enum oidc_cmd oidc_cmd,
     case GET_USER_GROUPS:
         sep = strrchr(input, '@');
         if (sep == NULL || sep == input) {
-            /* Short name: search by login prefix */
+            /* Short name: search by UnixUserName */
             search_expr = talloc_asprintf(rest_ctx,
-                                          "profile.login sw \"%s@\"", input);
+                                          "profile.UnixUserName eq \"%s\"",
+                                          input);
         } else {
             /* Full login: exact match */
             search_expr = talloc_asprintf(rest_ctx,
