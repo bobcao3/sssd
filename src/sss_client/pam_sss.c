@@ -1882,8 +1882,29 @@ static int prompt_oauth2(pam_handle_t *pamh, struct pam_items *pi,
 
     if (prompt != NULL && prompt[0] != '\0') {
         char *answer = NULL;
+        char *combined_prompt = NULL;
 
-        ret = do_pam_conversation(pamh, PAM_PROMPT_ECHO_OFF, prompt, NULL, &answer);
+        /* Some SSH clients / terminal integrations (e.g. Ghostty's ssh
+         * terminfo wrapper) drop the PAM_TEXT_INFO instruction above,
+         * leaving only an echo-off prompt that is indistinguishable from
+         * a password prompt. Repeat the URL inline and use
+         * PAM_PROMPT_ECHO_ON so the user sees what they are being asked. */
+        if (pi->oauth2_url_complete != NULL) {
+            ret = asprintf(&combined_prompt,
+                           _("Authenticate at %s then press ENTER: "),
+                           pi->oauth2_url_complete);
+        } else {
+            ret = asprintf(&combined_prompt,
+                           _("Authenticate with PIN %s at %s then press ENTER: "),
+                           pi->oauth2_pin, pi->oauth2_url);
+        }
+        if (ret == -1) {
+            return PAM_SYSTEM_ERR;
+        }
+
+        ret = do_pam_conversation(pamh, PAM_PROMPT_ECHO_ON,
+                                  combined_prompt, NULL, &answer);
+        free(combined_prompt);
         if (ret != PAM_SUCCESS) {
             D(("do_pam_conversation failed."));
             return ret;
