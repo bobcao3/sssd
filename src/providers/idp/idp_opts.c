@@ -42,5 +42,8 @@ struct dp_option default_idp_opts[] = {
     { "idmap_range_min", DP_OPT_NUMBER, { .number = 200000 }, NULL_NUMBER },
     { "idmap_range_max", DP_OPT_NUMBER, { .number = 2000200000LL }, NULL_NUMBER },
     { "idmap_range_size", DP_OPT_NUMBER, { .number = 200000 }, NULL_NUMBER },
+    { "idp_email_uid_enabled", DP_OPT_BOOL, BOOL_TRUE, BOOL_TRUE },
+    { "idp_email_uid_min", DP_OPT_NUMBER, { .number = 100000 }, NULL_NUMBER },
+    { "idp_email_uid_max", DP_OPT_NUMBER, { .number = 200000 }, NULL_NUMBER },
     DP_OPTION_TERMINATOR
 };

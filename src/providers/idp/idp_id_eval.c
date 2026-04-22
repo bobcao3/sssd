@@ -24,9 +24,126 @@
 
 #include <errno.h>
 #include <jansson.h>
+#include <openssl/evp.h>
 
 #include "util/util.h"
+#include "db/sysdb.h"
 #include "providers/idp/idp_id.h"
+
+/**
+ * Derive a deterministic UID from an email local part using SHA-256.
+ * Parity with okta-sync-email.py email_to_uid().
+ *
+ * Algorithm:
+ * 1. Lowercase email local part (strip @domain, strip +suffix)
+ * 2. SHA-256 hash via OpenSSL EVP
+ * 3. Byte-by-byte modular reduction to match Python int(digest,16) % range
+ * 4. uid = min_uid + (reduced_val)
+ *
+ * Returns UID on success, 0 on error.
+ */
+static uid_t email_hash_to_uid(const char *email, uint32_t min_uid,
+                                uint32_t max_uid)
+{
+    char local_part[256];
+    const char *at;
+    char *plus;
+    size_t len;
+    unsigned char digest[EVP_MAX_MD_SIZE];
+    unsigned int digest_len = 0;
+    EVP_MD_CTX *ctx = NULL;
+    uint32_t range_size;
+    uint32_t val = 0;
+
+    if (email == NULL || min_uid > max_uid) return 0;
+
+    /* Extract local part (before @) */
+    at = strchr(email, '@');
+    len = at ? (size_t)(at - email) : strlen(email);
+    if (len == 0 || len >= sizeof(local_part)) return 0;
+    memcpy(local_part, email, len);
+    local_part[len] = '\0';
+
+    /* Strip +suffix */
+    plus = strchr(local_part, '+');
+    if (plus) *plus = '\0';
+
+    /* Lowercase */
+    for (char *p = local_part; *p; p++) {
+        if (*p >= 'A' && *p <= 'Z') *p += 32;
+    }
+
+    /* SHA-256 via EVP */
+    ctx = EVP_MD_CTX_new();
+    if (ctx == NULL) return 0;
+
+    if (EVP_DigestInit_ex(ctx, EVP_sha256(), NULL) != 1 ||
+        EVP_DigestUpdate(ctx, local_part, strlen(local_part)) != 1 ||
+        EVP_DigestFinal_ex(ctx, digest, &digest_len) != 1 ||
+        digest_len != 32) {
+        EVP_MD_CTX_free(ctx);
+        return 0;
+    }
+    EVP_MD_CTX_free(ctx);
+
+    /* Match Python: int(hexdigest, 16) % range_size
+     * Process all 32 bytes with modular arithmetic so result
+     * matches the full 256-bit integer mod exactly. */
+    range_size = max_uid - min_uid + 1;
+    for (int i = 0; i < 32; i++) {
+        val = (uint32_t)(((uint64_t)val * 256 + digest[i]) % range_size);
+    }
+
+    return (uid_t)(min_uid + val);
+}
+
+/**
+ * Check for UID/name collisions in sysdb before storing.
+ * Returns EOK if safe, EEXIST if collision detected (skip this entry).
+ */
+static errno_t check_collision(TALLOC_CTX *mem_ctx,
+                                struct sss_domain_info *dom,
+                                const char *username, uid_t uid)
+{
+    errno_t ret;
+    struct ldb_result *res = NULL;
+
+    /* Check 1: existing user with same UID but different name */
+    ret = sysdb_getpwuid(mem_ctx, dom, uid, &res);
+    if (ret == EOK && res != NULL && res->count > 0) {
+        const char *existing_name = ldb_msg_find_attr_as_string(
+            res->msgs[0], SYSDB_NAME, NULL);
+        if (existing_name != NULL &&
+            strcmp(existing_name, username) != 0) {
+            DEBUG(SSSDBG_OP_FAILURE,
+                  "UID COLLISION: uid %u already assigned to %s, "
+                  "cannot assign to %s\n",
+                  uid, existing_name, username);
+            talloc_free(res);
+            return EEXIST;
+        }
+    }
+    talloc_free(res);
+    res = NULL;
+
+    /* Check 2: existing user with same name but different UID */
+    ret = sysdb_getpwnam(mem_ctx, dom, username, &res);
+    if (ret == EOK && res != NULL && res->count > 0) {
+        uid_t existing_uid = (uid_t)ldb_msg_find_attr_as_uint64(
+            res->msgs[0], SYSDB_UIDNUM, 0);
+        if (existing_uid != 0 && existing_uid != uid) {
+            DEBUG(SSSDBG_OP_FAILURE,
+                  "NAME COLLISION: %s already has uid %u, "
+                  "cannot assign uid %u\n",
+                  username, existing_uid, uid);
+            talloc_free(res);
+            return EEXIST;
+        }
+    }
+    talloc_free(res);
+
+    return EOK;
+}
 
 static errno_t store_json_user(struct idp_id_ctx *idp_id_ctx, json_t *user,
                                const char *group_name)
@@ -34,6 +151,8 @@ static errno_t store_json_user(struct idp_id_ctx *idp_id_ctx, json_t *user,
     errno_t ret;
     json_t *user_name = NULL;
     json_t *uuid = NULL;
+    json_t *email_json = NULL;
+    json_t *unix_user_name_json = NULL;
     int cache_timeout;
     struct sss_domain_info *dom;
     uid_t uid;
@@ -41,6 +160,11 @@ static errno_t store_json_user(struct idp_id_ctx *idp_id_ctx, json_t *user,
     char *fqdn = NULL;
     enum idmap_error_code err;
     struct sysdb_attrs *attrs = NULL;
+    bool email_uid_enabled;
+    uint32_t email_uid_min, email_uid_max;
+    const char *email = NULL;
+    char *gecos = NULL;
+    bool has_unix_username;
 
     dom = idp_id_ctx->be_ctx->domain;
 
@@ -69,19 +193,86 @@ static errno_t store_json_user(struct idp_id_ctx *idp_id_ctx, json_t *user,
         goto done;
     }
 
-    err = sss_idmap_gen_to_unix(idp_id_ctx->idmap_ctx,
-                                idp_id_ctx->token_endpoint,
-                                json_string_value(uuid), &uid);
-    if (err != IDMAP_SUCCESS) {
-        DEBUG(SSSDBG_OP_FAILURE, "Failed to generate UID for [%s][%s].\n",
-                                 fqdn, json_string_value(uuid));
-        ret = EIO;
+    /* Read email (set by P3 enrichment) */
+    email_json = json_object_get(user, "email");
+    if (email_json != NULL && json_is_string(email_json)) {
+        email = json_string_value(email_json);
+    }
+
+    /* Check if user has an explicit UnixUserName (legacy path) */
+    unix_user_name_json = json_object_get(user, "UnixUserName");
+    has_unix_username = (unix_user_name_json != NULL &&
+                         json_is_string(unix_user_name_json) &&
+                         json_string_value(unix_user_name_json)[0] != '\0');
+
+    /* Read email-UID config options */
+    email_uid_enabled = dp_opt_get_bool(idp_id_ctx->idp_options,
+                                         IDP_EMAIL_UID_ENABLED);
+    email_uid_min = (uint32_t)dp_opt_get_int(idp_id_ctx->idp_options,
+                                              IDP_EMAIL_UID_MIN);
+    email_uid_max = (uint32_t)dp_opt_get_int(idp_id_ctx->idp_options,
+                                              IDP_EMAIL_UID_MAX);
+
+    if (has_unix_username) {
+        /* Legacy path: UID via idmap hash (unchanged) */
+        err = sss_idmap_gen_to_unix(idp_id_ctx->idmap_ctx,
+                                    idp_id_ctx->token_endpoint,
+                                    json_string_value(uuid), &uid);
+        if (err != IDMAP_SUCCESS) {
+            DEBUG(SSSDBG_OP_FAILURE, "Failed to generate UID for [%s][%s].\n",
+                                     fqdn, json_string_value(uuid));
+            ret = EIO;
+            goto done;
+        }
+        gecos = talloc_asprintf(idp_id_ctx, "OktaManaged-%s",
+                                json_string_value(uuid));
+        if (gecos == NULL) {
+            DEBUG(SSSDBG_OP_FAILURE, "Failed to allocate GECOS string.\n");
+            ret = ENOMEM;
+            goto done;
+        }
+    } else if (email != NULL && email_uid_enabled) {
+        /* Email-only path: UID via SHA-256 hash */
+        uid = email_hash_to_uid(email, email_uid_min, email_uid_max);
+        if (uid == 0) {
+            DEBUG(SSSDBG_OP_FAILURE,
+                  "Failed to generate email-hash UID for [%s].\n", fqdn);
+            ret = EIO;
+            goto done;
+        }
+        gecos = talloc_asprintf(idp_id_ctx, "EmailSyncManaged-%s",
+                                json_string_value(uuid));
+        if (gecos == NULL) {
+            DEBUG(SSSDBG_OP_FAILURE, "Failed to allocate GECOS string.\n");
+            ret = ENOMEM;
+            goto done;
+        }
+    } else {
+        /* No UnixUserName AND no email / email_uid disabled */
+        DEBUG(SSSDBG_MINOR_FAILURE,
+              "User [%s] has no UnixUserName and no email, skipping.\n",
+              fqdn);
+        ret = EINVAL;
         goto done;
     }
+
     if (dom->mpg_mode != MPG_DISABLED) {
         gid = 0;
     } else {
         gid = uid;
+    }
+
+    /* Collision detection */
+    ret = check_collision(idp_id_ctx, dom, json_string_value(user_name), uid);
+    if (ret == EEXIST) {
+        /* Skip this user (parity with okta-sync-email.py) */
+        DEBUG(SSSDBG_MINOR_FAILURE,
+              "Collision detected for user [%s] uid %u, skipping.\n",
+              fqdn, uid);
+        ret = EOK;
+        goto done;
+    } else if (ret != EOK) {
+        goto done;
     }
 
     attrs = sysdb_new_attrs(idp_id_ctx);
@@ -98,9 +289,19 @@ static errno_t store_json_user(struct idp_id_ctx *idp_id_ctx, json_t *user,
         goto done;
     }
 
+    /* Store email if available */
+    if (email != NULL) {
+        ret = sysdb_attrs_add_string(attrs, SYSDB_USER_EMAIL, email);
+        if (ret != EOK) {
+            DEBUG(SSSDBG_OP_FAILURE,
+                  "Failed to add email to user attributes.\n");
+            goto done;
+        }
+    }
+
     cache_timeout = dom->user_timeout;
     ret = sysdb_store_user(dom, fqdn, NULL,
-                           uid, gid, NULL, NULL, NULL, NULL, attrs, NULL,
+                           uid, gid, gecos, NULL, NULL, NULL, attrs, NULL,
                            cache_timeout, 0);
     if (ret != EOK) {
         DEBUG(SSSDBG_OP_FAILURE, "Failed to store user [%s].\n", fqdn);
@@ -121,6 +322,7 @@ static errno_t store_json_user(struct idp_id_ctx *idp_id_ctx, json_t *user,
 done:
     talloc_free(attrs);
     talloc_free(fqdn);
+    talloc_free(gecos);
 
     return ret;
 }
@@ -297,7 +499,7 @@ static errno_t eval_obj_buf(struct idp_id_ctx *idp_id_ctx,
         if (ret != EOK) {
             tmp = json_dumps(obj, 0);
             DEBUG(SSSDBG_OP_FAILURE, "Failed to store JSON %s [%s].\n", type,
-                                                                        tmp);
+                                                                         tmp);
             free(tmp);
         }
     }

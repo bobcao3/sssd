@@ -50,6 +50,9 @@ enum idp_opts {
     IDMAP_LOWER,
     IDMAP_UPPER,
     IDMAP_RANGESIZE,
+    IDP_EMAIL_UID_ENABLED,     // bool, default true
+    IDP_EMAIL_UID_MIN,         // int, default 100000
+    IDP_EMAIL_UID_MAX,         // int, default 200000
 
     IDP_OPTS
 };

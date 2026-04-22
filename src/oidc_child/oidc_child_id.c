@@ -375,57 +375,73 @@ errno_t okta_lookup(TALLOC_CTX *mem_ctx, enum oidc_cmd oidc_cmd,
 {
     errno_t ret;
     char *uri;
-    char *search_expr;
+    char *search_expr = NULL;
     char *search_enc;
     char *short_name;
     char *sep;
     const char *obj_id;
     char *flat;
+    bool found = false;
+    /* Search strategies: for short-name user queries we try UnixUserName
+     * first, then fall back to login starts-with for email-only users. */
+    const char *search_strategies[2];
+    int n_strategies = 0;
+    int strategy;
     struct name_and_type_identifier okta_name_and_type_identifier = {
                             .user_identifier_attr = "login",
                             .group_identifier_attr = "name",
                             .user_name_attr = "UnixUserName",
-                            .group_name_attr = "name" };
+                            .group_name_attr = "name",
+                            .user_email_attr = "email",
+                            .user_name_fallback_attr = "email" };
 
     if (base_url == NULL) {
         DEBUG(SSSDBG_OP_FAILURE, "Missing base URL in IdP type [okta].\n");
         return EINVAL;
     }
 
+    /* Build search expression(s) based on command and input type */
     switch (oidc_cmd) {
     case GET_USER:
     case GET_USER_GROUPS:
         sep = strrchr(input, '@');
         if (sep == NULL || sep == input) {
-            /* Short name: search by UnixUserName */
-            search_expr = talloc_asprintf(rest_ctx,
-                                          "profile.UnixUserName eq \"%s\"",
-                                          input);
+            /* Short name: try UnixUserName first, then login starts-with */
+            search_strategies[n_strategies++] =
+                talloc_asprintf(rest_ctx,
+                                "profile.UnixUserName eq \"%s\"", input);
+            search_strategies[n_strategies++] =
+                talloc_asprintf(rest_ctx,
+                                "profile.login sw \"%s@\"", input);
         } else {
-            /* Full login: exact match */
-            search_expr = talloc_asprintf(rest_ctx,
-                                          "profile.login eq \"%s\"", input);
+            /* Full login: exact match (single strategy) */
+            search_strategies[n_strategies++] =
+                talloc_asprintf(rest_ctx,
+                                "profile.login eq \"%s\"", input);
         }
         break;
     case GET_GROUP:
     case GET_GROUP_MEMBERS:
         sep = strrchr(input, '@');
         if (sep == NULL || sep == input) {
-            search_expr = talloc_asprintf(rest_ctx,
-                                          "profile.name eq \"%s\"", input);
+            search_strategies[n_strategies++] =
+                talloc_asprintf(rest_ctx,
+                                "profile.name eq \"%s\"", input);
         } else {
             short_name = talloc_strndup(rest_ctx, input, sep - input);
             if (short_name == NULL) {
                 DEBUG(SSSDBG_OP_FAILURE,
                       "Failed to generate short name, using plain input [%s].\n",
                       input);
-                search_expr = talloc_asprintf(rest_ctx,
-                                              "profile.name eq \"%s\"", input);
+                search_strategies[n_strategies++] =
+                    talloc_asprintf(rest_ctx,
+                                    "profile.name eq \"%s\"", input);
             } else {
-                search_expr = talloc_asprintf(rest_ctx,
-                                              "profile.name eq \"%s\" or "
-                                              "profile.name eq \"%s\"",
-                                              input, short_name);
+                search_strategies[n_strategies++] =
+                    talloc_asprintf(rest_ctx,
+                                    "profile.name eq \"%s\" or "
+                                    "profile.name eq \"%s\"",
+                                    input, short_name);
             }
         }
         break;
@@ -435,46 +451,72 @@ errno_t okta_lookup(TALLOC_CTX *mem_ctx, enum oidc_cmd oidc_cmd,
         goto done;
     }
 
-    if (search_expr == NULL) {
-        DEBUG(SSSDBG_OP_FAILURE, "Failed to create search expression.\n");
-        ret = ENOMEM;
-        goto done;
+    for (strategy = 0; strategy < n_strategies; strategy++) {
+        if (search_strategies[strategy] == NULL) {
+            DEBUG(SSSDBG_OP_FAILURE, "Failed to create search expression.\n");
+            ret = ENOMEM;
+            goto done;
+        }
+
+        search_enc = url_encode_string(rest_ctx, search_strategies[strategy]);
+        if (search_enc == NULL) {
+            DEBUG(SSSDBG_OP_FAILURE, "Failed to encode search expression.\n");
+            ret = ENOMEM;
+            goto done;
+        }
+
+        switch (oidc_cmd) {
+        case GET_USER:
+        case GET_USER_GROUPS:
+            uri = talloc_asprintf(rest_ctx, "%s/api/v1/users?search=%s",
+                                  base_url, search_enc);
+            break;
+        case GET_GROUP:
+        case GET_GROUP_MEMBERS:
+            uri = talloc_asprintf(rest_ctx, "%s/api/v1/groups?search=%s",
+                                  base_url, search_enc);
+            break;
+        default:
+            DEBUG(SSSDBG_OP_FAILURE, "Unknown command [%d].\n", oidc_cmd);
+            ret = EINVAL;
+            goto done;
+        }
+
+        if (uri == NULL) {
+            DEBUG(SSSDBG_OP_FAILURE, "Failed to generate lookup URI.\n");
+            ret = ENOMEM;
+            goto done;
+        }
+
+        clean_http_data(rest_ctx);
+        ret = do_http_request(rest_ctx, uri, NULL, bearer_token);
+        talloc_free(uri);
+        if (ret != EOK) {
+            DEBUG(SSSDBG_OP_FAILURE, "Search request failed.\n");
+            goto done;
+        }
+
+        /* Check if response has results */
+        const char *http_data = get_http_data(rest_ctx);
+        json_error_t json_error;
+        json_t *resp = json_loads(http_data, 0, &json_error);
+        if (resp != NULL && json_is_array(resp) && json_array_size(resp) > 0) {
+            json_decref(resp);
+            found = true;
+            break;
+        }
+        json_decref(resp);
+
+        /* No results: if more strategies, try next (email fallback) */
+        DEBUG(SSSDBG_TRACE_LIBS,
+              "Search strategy %d returned no results for [%s].\n",
+              strategy, input);
     }
 
-    search_enc = url_encode_string(rest_ctx, search_expr);
-    if (search_enc == NULL) {
-        DEBUG(SSSDBG_OP_FAILURE, "Failed to encode search expression.\n");
-        ret = ENOMEM;
-        goto done;
-    }
-
-    switch (oidc_cmd) {
-    case GET_USER:
-    case GET_USER_GROUPS:
-        uri = talloc_asprintf(rest_ctx, "%s/api/v1/users?search=%s",
-                              base_url, search_enc);
-        break;
-    case GET_GROUP:
-    case GET_GROUP_MEMBERS:
-        uri = talloc_asprintf(rest_ctx, "%s/api/v1/groups?search=%s",
-                              base_url, search_enc);
-        break;
-    default:
-        DEBUG(SSSDBG_OP_FAILURE, "Unknown command [%d].\n", oidc_cmd);
-        ret = EINVAL;
-        goto done;
-    }
-
-    if (uri == NULL) {
-        DEBUG(SSSDBG_OP_FAILURE, "Failed to generate lookup URI.\n");
-        ret = ENOMEM;
-        goto done;
-    }
-
-    clean_http_data(rest_ctx);
-    ret = do_http_request(rest_ctx, uri, NULL, bearer_token);
-    if (ret != EOK) {
-        DEBUG(SSSDBG_OP_FAILURE, "Search request failed.\n");
+    if (!found) {
+        DEBUG(SSSDBG_OP_FAILURE,
+              "No results found for [%s] after all search strategies.\n", input);
+        ret = ENOENT;
         goto done;
     }
 

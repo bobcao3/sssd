@@ -85,6 +85,8 @@ struct name_and_type_identifier {
     const char *group_identifier_attr;
     const char *user_name_attr;
     const char *group_name_attr;
+    const char *user_email_attr;           // NEW: "email" for Okta, NULL for others
+    const char *user_name_fallback_attr;   // NEW: "email" for Okta, NULL for others
 };
 
 /* oidc_child_curl.c */

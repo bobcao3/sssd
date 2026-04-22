@@ -875,6 +875,67 @@ done:
     return ret;
 }
 
+/**
+ * Derive a POSIX-compatible username from an email address.
+ * Strips @domain and +suffix, lowercases, validates against
+ * ^[a-z_][a-z0-9._-]{0,31}$  (parity with okta-sync-email.py USERNAME_RE).
+ *
+ * Returns EOK + sets *out_name on success.
+ * Returns EINVAL if local part is not a valid POSIX username.
+ */
+static errno_t email_to_posix_name(TALLOC_CTX *mem_ctx,
+                                    const char *email,
+                                    char **out_name)
+{
+    const char *at_sign;
+    char *plus_sign;
+    char *name;
+    size_t len;
+
+    if (email == NULL) return EINVAL;
+
+    at_sign = strchr(email, '@');
+    if (at_sign == NULL) {
+        len = strlen(email);
+    } else {
+        len = at_sign - email;
+    }
+
+    name = talloc_strndup(mem_ctx, email, len);
+    if (name == NULL) return ENOMEM;
+
+    /* Strip +suffix */
+    plus_sign = strchr(name, '+');
+    if (plus_sign != NULL) *plus_sign = '\0';
+
+    /* Lowercase */
+    for (char *p = name; *p; p++) {
+        if (*p >= 'A' && *p <= 'Z') *p += 32;
+    }
+
+    /* Validate: first char [a-z_], rest [a-z0-9._-], total 1-32 chars */
+    len = strlen(name);
+    if (len < 1 || len > 32) {
+        talloc_free(name);
+        return EINVAL;
+    }
+    if (!(name[0] >= 'a' && name[0] <= 'z') && name[0] != '_') {
+        talloc_free(name);
+        return EINVAL;
+    }
+    for (size_t i = 1; i < len; i++) {
+        char c = name[i];
+        if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+              c == '.' || c == '_' || c == '-')) {
+            talloc_free(name);
+            return EINVAL;
+        }
+    }
+
+    *out_name = name;
+    return EOK;
+}
+
 static errno_t add_posix_to_json(json_t *item,
                                  struct name_and_type_identifier *map,
                                  char domain_seperator)
@@ -905,11 +966,54 @@ static errno_t add_posix_to_json(json_t *item,
     }
 
     if (is_user) {
+        /* --- Set posixUsername (with email fallback) --- */
         ret = get_and_set_name(item, domain_seperator, map->user_name_attr,
                                "posixUsername");
+        if (ret == EINVAL && map->user_name_fallback_attr != NULL) {
+            /* UnixUserName absent: derive from email */
+            json_t *email_attr = json_object_get(item,
+                                                 map->user_name_fallback_attr);
+            if (email_attr != NULL && json_is_string(email_attr)) {
+                char *email_name = NULL;
+                ret = email_to_posix_name(item,
+                                          json_string_value(email_attr),
+                                          &email_name);
+                if (ret == EOK) {
+                    json_object_set(item, "posixUsername",
+                                    json_string(email_name));
+                    talloc_free(email_name);
+                }
+                /* If email_to_posix_name returns EINVAL → user skipped */
+            }
+        }
         if (ret != EOK) {
             DEBUG(SSSDBG_OP_FAILURE, "Failed to set 'posixUsername'.\n");
             goto done;
+        }
+
+        /* --- Set posixEmailUsername (always, for Phase 2 readiness) --- */
+        if (map->user_email_attr != NULL) {
+            json_t *email_attr = json_object_get(item, map->user_email_attr);
+            if (email_attr != NULL && json_is_string(email_attr)) {
+                char *email_name = NULL;
+                errno_t email_ret = email_to_posix_name(
+                    item, json_string_value(email_attr), &email_name);
+                if (email_ret == EOK) {
+                    json_object_set(item, "posixEmailUsername",
+                                    json_string(email_name));
+                    talloc_free(email_name);
+                }
+                /* Failure to set posixEmailUsername is non-fatal */
+            }
+        }
+
+        /* --- Set email key explicitly for downstream --- */
+        if (map->user_email_attr != NULL) {
+            json_t *email_attr = json_object_get(item, map->user_email_attr);
+            if (email_attr != NULL && json_is_string(email_attr)) {
+                json_object_set(item, "email",
+                                json_string(json_string_value(email_attr)));
+            }
         }
 
         tmp = json_string("user");

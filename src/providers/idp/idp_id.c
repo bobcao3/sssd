@@ -28,6 +28,8 @@
 #include "util/sss_chain_id.h"
 #include "providers/idp/idp_id.h"
 #include "providers/idp/idp_private.h"
+#include "db/sysdb.h"
+#include "util/strtonum.h"
 
 enum idp_lookup_type {
     IDP_LOOKUP_USER,
@@ -54,7 +56,8 @@ errno_t set_oidc_extra_args(TALLOC_CTX *mem_ctx, struct idp_id_ctx *idp_id_ctx,
     }
 
     if (filter_type != BE_FILTER_NAME) {
-        DEBUG(SSSDBG_OP_FAILURE, "Unsupported filter type [%d].\n",
+        DEBUG(SSSDBG_OP_FAILURE, "Unsupported filter type [%d]. ID number lookups are "
+                                  "handled upstream in idp_handle_acct_req_send().\n",
                                  filter_type);
         return EINVAL;
     }
@@ -461,6 +464,40 @@ idp_handle_acct_req_send(TALLOC_CTX *mem_ctx,
     if (ar == NULL) {
         DEBUG(SSSDBG_OP_FAILURE, "Missing input.\n");
         ret = EINVAL;
+        goto done;
+    }
+
+    if ((ar->entry_type & BE_REQ_TYPE_MASK) == BE_REQ_USER
+            && ar->filter_type == BE_FILTER_IDNUM) {
+        uid_t uid;
+        struct ldb_result *res = NULL;
+
+        uid = strtouint32(ar->filter_value, NULL, 10);
+        if (errno != 0) {
+            ret = EINVAL;
+            goto done;
+        }
+
+        ret = sysdb_getpwuid(ar, idp_id_ctx->be_ctx->domain, uid, &res);
+        if (ret != EOK) {
+            goto done;
+        }
+
+        if (res->count == 0) {
+            /* Not in cache, not an IdP user — let NSS fall through */
+            talloc_free(res);
+            state->dp_error = DP_ERR_OK;
+            state->idp_ret = EOK;
+            state->err = "User not found";
+            ret = EOK;
+            goto done;
+        }
+
+        /* Found in cache — return cached entry */
+        talloc_free(res);
+        state->dp_error = DP_ERR_OK;
+        state->idp_ret = EOK;
+        ret = EOK;
         goto done;
     }
 
