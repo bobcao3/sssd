@@ -980,8 +980,14 @@ static errno_t add_posix_to_json(json_t *item,
                     json_object_set(item, "posixUsername",
                                     json_string(email_name));
                     free(email_name);
+                    ret = EOK;
+                } else {
+                    /* email_to_posix_name failed: treat as no resolvable name */
+                    ret = ENOENT;
                 }
-                /* If email_to_posix_name returns EINVAL → user skipped */
+            } else {
+                /* No email attribute present: no resolvable name */
+                ret = ENOENT;
             }
         }
         if (ret != EOK) {
@@ -1092,7 +1098,12 @@ errno_t add_posix_to_json_string_array(TALLOC_CTX *mem_ctx,
 
     json_array_foreach(array, index, item) {
         ret = add_posix_to_json(item, map, domain_seperator);
-        if (ret != EOK) {
+        if (ret == ENOENT) {
+            /* No resolvable name for this entry; skip and continue */
+            DEBUG(SSSDBG_MINOR_FAILURE,
+                  "Skipping entry at index %zu: no resolvable name.\n", index);
+            continue;
+        } else if (ret != EOK) {
             DEBUG(SSSDBG_OP_FAILURE, "Failed to add POSIX data.\n");
             json_decref(new_array);
             goto done;

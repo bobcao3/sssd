@@ -153,18 +153,23 @@ static errno_t store_json_user(struct idp_id_ctx *idp_id_ctx, json_t *user,
     json_t *uuid = NULL;
     json_t *email_json = NULL;
     json_t *unix_user_name_json = NULL;
+    json_t *email_user_name_json = NULL;
     int cache_timeout;
     struct sss_domain_info *dom;
     uid_t uid;
     gid_t gid;
     char *fqdn = NULL;
+    char *email_fqdn = NULL;
     enum idmap_error_code err;
     struct sysdb_attrs *attrs = NULL;
+    struct sysdb_attrs *email_attrs = NULL;
     bool email_uid_enabled;
     uint32_t email_uid_min, email_uid_max;
     const char *email = NULL;
     char *gecos = NULL;
+    char *email_gecos = NULL;
     bool has_unix_username;
+    bool has_email_username;
 
     dom = idp_id_ctx->be_ctx->domain;
 
@@ -204,6 +209,19 @@ static errno_t store_json_user(struct idp_id_ctx *idp_id_ctx, json_t *user,
     has_unix_username = (unix_user_name_json != NULL &&
                          json_is_string(unix_user_name_json) &&
                          json_string_value(unix_user_name_json)[0] != '\0');
+
+    /* Check if an email-derived username was set by add_posix_to_json */
+    email_user_name_json = json_object_get(user, "posixEmailUsername");
+    has_email_username = (email_user_name_json != NULL &&
+                          json_is_string(email_user_name_json) &&
+                          json_string_value(email_user_name_json)[0] != '\0');
+
+    /* For dual-account: email username must differ from posixUsername */
+    if (has_unix_username && has_email_username &&
+        strcmp(json_string_value(user_name),
+               json_string_value(email_user_name_json)) == 0) {
+        has_email_username = false;
+    }
 
     /* Read email-UID config options */
     email_uid_enabled = dp_opt_get_bool(idp_id_ctx->idp_options,
@@ -319,10 +337,115 @@ static errno_t store_json_user(struct idp_id_ctx *idp_id_ctx, json_t *user,
             }
     }
 
+    /* Dual-account: if posixEmailUsername differs from posixUsername,
+     * store a second sysdb entry with email-hash UID and EmailSyncManaged GECOS. */
+    if (has_unix_username && has_email_username
+            && email != NULL && email_uid_enabled) {
+        uid_t email_uid;
+        gid_t email_gid;
+
+        email_uid = email_hash_to_uid(email, email_uid_min, email_uid_max);
+        if (email_uid == 0) {
+            DEBUG(SSSDBG_MINOR_FAILURE,
+                  "Failed to compute email-hash UID for dual-account [%s]; "
+                  "skipping email entry.\n",
+                  json_string_value(email_user_name_json));
+            ret = EOK;
+            goto done;
+        }
+
+        email_fqdn = sss_create_internal_fqname(
+                         idp_id_ctx,
+                         json_string_value(email_user_name_json),
+                         dom->name);
+        if (email_fqdn == NULL) {
+            DEBUG(SSSDBG_OP_FAILURE,
+                  "Failed to generate fqdn for email account.\n");
+            ret = ENOMEM;
+            goto done;
+        }
+
+        ret = check_collision(idp_id_ctx, dom,
+                              json_string_value(email_user_name_json),
+                              email_uid);
+        if (ret == EEXIST) {
+            DEBUG(SSSDBG_MINOR_FAILURE,
+                  "Collision for email account [%s] uid %u, skipping.\n",
+                  email_fqdn, email_uid);
+            ret = EOK;
+            goto done;
+        } else if (ret != EOK) {
+            goto done;
+        }
+
+        email_gecos = talloc_asprintf(idp_id_ctx, "EmailSyncManaged-%s",
+                                      json_string_value(uuid));
+        if (email_gecos == NULL) {
+            DEBUG(SSSDBG_OP_FAILURE,
+                  "Failed to allocate GECOS for email account.\n");
+            ret = ENOMEM;
+            goto done;
+        }
+
+        email_gid = (dom->mpg_mode != MPG_DISABLED) ? 0 : email_uid;
+
+        email_attrs = sysdb_new_attrs(idp_id_ctx);
+        if (email_attrs == NULL) {
+            DEBUG(SSSDBG_OP_FAILURE,
+                  "Failed to allocate attrs for email account.\n");
+            ret = ENOMEM;
+            goto done;
+        }
+
+        ret = sysdb_attrs_add_string(email_attrs, SYSDB_UUID,
+                                     json_string_value(uuid));
+        if (ret != EOK) {
+            DEBUG(SSSDBG_OP_FAILURE,
+                  "Failed to add UUID to email account attrs.\n");
+            goto done;
+        }
+
+        ret = sysdb_attrs_add_string(email_attrs, SYSDB_USER_EMAIL, email);
+        if (ret != EOK) {
+            DEBUG(SSSDBG_OP_FAILURE,
+                  "Failed to add email to email account attrs.\n");
+            goto done;
+        }
+
+        cache_timeout = dom->user_timeout;
+        ret = sysdb_store_user(dom, email_fqdn, NULL,
+                               email_uid, email_gid, email_gecos,
+                               NULL, NULL, NULL, email_attrs, NULL,
+                               cache_timeout, 0);
+        if (ret != EOK) {
+            DEBUG(SSSDBG_OP_FAILURE,
+                  "Failed to store email account [%s].\n", email_fqdn);
+            goto done;
+        }
+
+        if (group_name != NULL) {
+            ret = sysdb_add_group_member(dom, group_name, email_fqdn,
+                                         SYSDB_MEMBER_USER, false);
+            if (ret != EOK) {
+                DEBUG(SSSDBG_OP_FAILURE,
+                      "Failed to add email account [%s] to group [%s].\n",
+                      email_fqdn, group_name);
+                goto done;
+            }
+        }
+
+        DEBUG(SSSDBG_TRACE_LIBS,
+              "Stored dual-account email entry [%s] uid=%u.\n",
+              email_fqdn, email_uid);
+    }
+
 done:
     talloc_free(attrs);
+    talloc_free(email_attrs);
     talloc_free(fqdn);
+    talloc_free(email_fqdn);
     talloc_free(gecos);
+    talloc_free(email_gecos);
 
     return ret;
 }
