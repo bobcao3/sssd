@@ -883,8 +883,7 @@ done:
  * Returns EOK + sets *out_name on success.
  * Returns EINVAL if local part is not a valid POSIX username.
  */
-static errno_t email_to_posix_name(TALLOC_CTX *mem_ctx,
-                                    const char *email,
+static errno_t email_to_posix_name(const char *email,
                                     char **out_name)
 {
     const char *at_sign;
@@ -901,7 +900,7 @@ static errno_t email_to_posix_name(TALLOC_CTX *mem_ctx,
         len = at_sign - email;
     }
 
-    name = talloc_strndup(mem_ctx, email, len);
+    name = strndup(email, len);
     if (name == NULL) return ENOMEM;
 
     /* Strip +suffix */
@@ -916,18 +915,18 @@ static errno_t email_to_posix_name(TALLOC_CTX *mem_ctx,
     /* Validate: first char [a-z_], rest [a-z0-9._-], total 1-32 chars */
     len = strlen(name);
     if (len < 1 || len > 32) {
-        talloc_free(name);
+        free(name);
         return EINVAL;
     }
     if (!(name[0] >= 'a' && name[0] <= 'z') && name[0] != '_') {
-        talloc_free(name);
+        free(name);
         return EINVAL;
     }
     for (size_t i = 1; i < len; i++) {
         char c = name[i];
         if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
               c == '.' || c == '_' || c == '-')) {
-            talloc_free(name);
+            free(name);
             return EINVAL;
         }
     }
@@ -975,13 +974,12 @@ static errno_t add_posix_to_json(json_t *item,
                                                  map->user_name_fallback_attr);
             if (email_attr != NULL && json_is_string(email_attr)) {
                 char *email_name = NULL;
-                ret = email_to_posix_name(item,
-                                          json_string_value(email_attr),
-                                          &email_name);
+                ret = email_to_posix_name(json_string_value(email_attr),
+                                           &email_name);
                 if (ret == EOK) {
                     json_object_set(item, "posixUsername",
                                     json_string(email_name));
-                    talloc_free(email_name);
+                    free(email_name);
                 }
                 /* If email_to_posix_name returns EINVAL → user skipped */
             }
@@ -997,11 +995,11 @@ static errno_t add_posix_to_json(json_t *item,
             if (email_attr != NULL && json_is_string(email_attr)) {
                 char *email_name = NULL;
                 errno_t email_ret = email_to_posix_name(
-                    item, json_string_value(email_attr), &email_name);
+                    json_string_value(email_attr), &email_name);
                 if (email_ret == EOK) {
                     json_object_set(item, "posixEmailUsername",
                                     json_string(email_name));
-                    talloc_free(email_name);
+                    free(email_name);
                 }
                 /* Failure to set posixEmailUsername is non-fatal */
             }
