@@ -26,10 +26,230 @@
 
 #include "util/util.h"
 
+#include <errno.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/file.h>
+#include <sys/stat.h>
+#include <time.h>
+#include <unistd.h>
+
+#include <openssl/evp.h>
+
 #define IS_ID_CMD(cmd) ( \
     cmd == GET_USER || cmd == GET_USER_GROUPS \
                               || cmd == GET_GROUP \
                               || cmd == GET_GROUP_MEMBERS )
+
+/* ---- Token cache --------------------------------------------------------
+ *
+ * Each oidc_child invocation is a fresh fork+exec from sssd_be, so no
+ * in-process state survives. Cache lives in tmpfs at /run/sssd, keyed on
+ * sha256(client_id|token_endpoint|scope), so independent IdP configs do
+ * not share entries. Reads take a shared flock; writes go through a
+ * per-pid temp file + atomic rename. A successful write races between
+ * concurrent forks are benign — last-writer-wins, both tokens are
+ * independently valid until expiry.
+ */
+#define TOKEN_CACHE_DIR            "/run/sssd"
+#define TOKEN_CACHE_SKEW_S         60
+#define TOKEN_CACHE_DEFAULT_TTL_S  3600
+
+static char *token_cache_path(TALLOC_CTX *mem_ctx,
+                              const char *client_id,
+                              const char *token_endpoint,
+                              const char *scope)
+{
+    EVP_MD_CTX *md_ctx = NULL;
+    unsigned char digest[EVP_MAX_MD_SIZE];
+    unsigned int digest_len = 0;
+    char hex[2 * 32 + 1];
+    char *path = NULL;
+
+    md_ctx = EVP_MD_CTX_new();
+    if (md_ctx == NULL) goto done;
+    if (EVP_DigestInit_ex(md_ctx, EVP_sha256(), NULL) != 1) goto done;
+    EVP_DigestUpdate(md_ctx, client_id, strlen(client_id));
+    EVP_DigestUpdate(md_ctx, "|", 1);
+    EVP_DigestUpdate(md_ctx, token_endpoint, strlen(token_endpoint));
+    EVP_DigestUpdate(md_ctx, "|", 1);
+    if (scope != NULL) {
+        EVP_DigestUpdate(md_ctx, scope, strlen(scope));
+    }
+    if (EVP_DigestFinal_ex(md_ctx, digest, &digest_len) != 1) goto done;
+    if (digest_len < 32) goto done;
+
+    for (unsigned i = 0; i < 32; i++) {
+        snprintf(&hex[i * 2], 3, "%02x", digest[i]);
+    }
+    hex[64] = '\0';
+    path = talloc_asprintf(mem_ctx, "%s/oidc_token_%s.json",
+                           TOKEN_CACHE_DIR, hex);
+
+done:
+    EVP_MD_CTX_free(md_ctx);
+    return path;
+}
+
+/* EOK: hit, *out_token populated.
+ * ENOENT: miss.
+ * ETIMEDOUT: present but within skew of expiry.
+ * other: I/O / parse error. */
+static errno_t token_cache_read(TALLOC_CTX *mem_ctx, const char *path,
+                                const char **out_token)
+{
+    int fd = -1;
+    char buf[4096];
+    ssize_t n;
+    json_t *obj = NULL;
+    json_t *exp_j;
+    json_t *tok_j;
+    json_error_t je;
+    errno_t ret = EIO;
+
+    *out_token = NULL;
+
+    fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        ret = (errno == ENOENT) ? ENOENT : errno;
+        goto done;
+    }
+    if (flock(fd, LOCK_SH) != 0) {
+        ret = errno;
+        goto done;
+    }
+    n = read(fd, buf, sizeof(buf) - 1);
+    if (n <= 0) {
+        ret = ENOENT;
+        goto done;
+    }
+    buf[n] = '\0';
+
+    obj = json_loads(buf, 0, &je);
+    if (obj == NULL) {
+        DEBUG(SSSDBG_MINOR_FAILURE,
+              "Token cache parse failed at line %d: %s.\n",
+              je.line, je.text);
+        ret = EINVAL;
+        goto done;
+    }
+    exp_j = json_object_get(obj, "exp");
+    tok_j = json_object_get(obj, "access_token");
+    if (!json_is_integer(exp_j) || !json_is_string(tok_j)) {
+        ret = EINVAL;
+        goto done;
+    }
+    if ((time_t)json_integer_value(exp_j) - time(NULL) < TOKEN_CACHE_SKEW_S) {
+        ret = ETIMEDOUT;
+        goto done;
+    }
+    *out_token = talloc_strdup(mem_ctx, json_string_value(tok_j));
+    ret = (*out_token != NULL) ? EOK : ENOMEM;
+
+done:
+    if (obj != NULL) json_decref(obj);
+    if (fd >= 0) close(fd);
+    return ret;
+}
+
+/* Best-effort: never fails the caller. */
+static void token_cache_write(const char *path,
+                              const char *access_token,
+                              long expires_in)
+{
+    char *tmp = NULL;
+    int fd = -1;
+    json_t *obj = NULL;
+    char *body = NULL;
+    time_t exp_at;
+
+    if (path == NULL || access_token == NULL) return;
+
+    if (expires_in <= 2 * TOKEN_CACHE_SKEW_S) {
+        expires_in = TOKEN_CACHE_DEFAULT_TTL_S;
+    }
+    exp_at = time(NULL) + expires_in - TOKEN_CACHE_SKEW_S;
+
+    if (mkdir(TOKEN_CACHE_DIR, 0700) != 0 && errno != EEXIST) {
+        DEBUG(SSSDBG_MINOR_FAILURE,
+              "Token cache mkdir [%s] failed: %s.\n",
+              TOKEN_CACHE_DIR, strerror(errno));
+        return;
+    }
+
+    if (asprintf(&tmp, "%s.tmp.%d", path, (int)getpid()) < 0) {
+        return;
+    }
+
+    fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    if (fd < 0) {
+        DEBUG(SSSDBG_MINOR_FAILURE,
+              "Token cache open [%s] failed: %s.\n", tmp, strerror(errno));
+        goto done;
+    }
+
+    obj = json_object();
+    if (obj == NULL) goto done;
+    if (json_object_set_new(obj, "access_token",
+                            json_string(access_token)) != 0) goto done;
+    if (json_object_set_new(obj, "exp",
+                            json_integer((json_int_t)exp_at)) != 0) goto done;
+    body = json_dumps(obj, JSON_COMPACT);
+    if (body == NULL) goto done;
+
+    {
+        size_t left = strlen(body);
+        const char *p = body;
+        while (left > 0) {
+            ssize_t w = write(fd, p, left);
+            if (w < 0) {
+                if (errno == EINTR) continue;
+                DEBUG(SSSDBG_MINOR_FAILURE,
+                      "Token cache write failed: %s.\n", strerror(errno));
+                goto done;
+            }
+            p += w;
+            left -= (size_t)w;
+        }
+    }
+
+    if (close(fd) != 0) {
+        DEBUG(SSSDBG_MINOR_FAILURE,
+              "Token cache close failed: %s.\n", strerror(errno));
+    }
+    fd = -1;
+
+    if (rename(tmp, path) != 0) {
+        DEBUG(SSSDBG_MINOR_FAILURE,
+              "Token cache rename [%s -> %s] failed: %s.\n",
+              tmp, path, strerror(errno));
+        unlink(tmp);
+    }
+
+done:
+    if (fd >= 0) close(fd);
+    if (obj != NULL) json_decref(obj);
+    free(body);
+    free(tmp);
+}
+
+static long parse_expires_in(const char *json_str)
+{
+    json_t *obj;
+    json_t *exp_j;
+    json_error_t je;
+    long ttl = TOKEN_CACHE_DEFAULT_TTL_S;
+
+    if (json_str == NULL) return ttl;
+    obj = json_loads(json_str, 0, &je);
+    if (obj == NULL) return ttl;
+    exp_j = json_object_get(obj, "expires_in");
+    if (json_is_integer(exp_j)) ttl = (long)json_integer_value(exp_j);
+    json_decref(obj);
+    return ttl;
+}
 
 /* Extracts and normalizes the base URL from an idp_type string of
  * the form https://... Sets *base_url to NULL if no URL is present
@@ -762,12 +982,16 @@ errno_t oidc_get_id(TALLOC_CTX *mem_ctx, enum oidc_cmd oidc_cmd,
                     bool libcurl_debug, const char *ca_db,
                     const char *client_id, const char *client_secret,
                     const char *private_key_file, const char *private_key_kid,
-                    const char *token_endpoint, const char *scope, char **out)
+                    const char *token_endpoint, const char *scope,
+                    bool no_token_cache, char **out)
 {
     errno_t ret;
     struct rest_ctx *rest_ctx;
     char *cli_cred_reply;
     const char *bearer_token;
+    char *cache_path = NULL;
+    bool used_cached = false;
+    bool retried = false;
 
     if (!IS_ID_CMD(oidc_cmd)) {
         DEBUG(SSSDBG_CRIT_FAILURE, "Unsupported command [%d].\n", oidc_cmd);
@@ -791,22 +1015,64 @@ errno_t oidc_get_id(TALLOC_CTX *mem_ctx, enum oidc_cmd oidc_cmd,
         return ENOMEM;
     }
 
-    if (private_key_file != NULL) {
-        ret = client_credentials_grant_jwt(rest_ctx, token_endpoint,
-                                           client_id, private_key_file,
-                                           private_key_kid, scope);
-    } else {
-        ret = client_credentials_grant(rest_ctx, token_endpoint,
-                                       client_id, client_secret, scope);
-    }
-    if (ret != EOK) {
-        DEBUG(SSSDBG_OP_FAILURE,
-              "Failed to get access token with client credentials grant.\n");
-        goto done;
+    /* Try the on-disk token cache first (unless explicitly disabled).
+     * Survives across oidc_child forks because each new process re-reads
+     * the file. Miss / stale falls through to a fresh client_credentials
+     * grant; on success we write the new token back for the next fork to
+     * reuse. If a cached token is later rejected with HTTP 401 by the
+     * lookup endpoint, we invalidate the cache and retry once with a
+     * freshly minted token (see retry_with_fresh_token below). */
+    if (!no_token_cache) {
+        cache_path = token_cache_path(mem_ctx, client_id,
+                                      token_endpoint, scope);
     }
 
-    cli_cred_reply = talloc_strdup(rest_ctx, get_http_data(rest_ctx));
-    bearer_token = get_bearer_token(rest_ctx, cli_cred_reply);
+acquire_token:
+    {
+        const char *cached_token = NULL;
+        errno_t cret;
+
+        if (cache_path != NULL && !retried) {
+            cret = token_cache_read(mem_ctx, cache_path, &cached_token);
+            if (cret == EOK && cached_token != NULL) {
+                DEBUG(SSSDBG_TRACE_FUNC,
+                      "Reusing cached access_token for client_id=[%s].\n",
+                      client_id);
+                bearer_token = cached_token;
+                used_cached = true;
+                goto have_token;
+            }
+            if (cret != ENOENT && cret != ETIMEDOUT) {
+                DEBUG(SSSDBG_MINOR_FAILURE,
+                      "Token cache read failed: %d (%s).\n",
+                      cret, strerror(cret));
+            }
+        }
+
+        used_cached = false;
+        if (private_key_file != NULL) {
+            ret = client_credentials_grant_jwt(rest_ctx, token_endpoint,
+                                               client_id, private_key_file,
+                                               private_key_kid, scope);
+        } else {
+            ret = client_credentials_grant(rest_ctx, token_endpoint,
+                                           client_id, client_secret, scope);
+        }
+        if (ret != EOK) {
+            DEBUG(SSSDBG_OP_FAILURE,
+                  "Failed to get access token with client credentials grant.\n");
+            goto done;
+        }
+
+        cli_cred_reply = talloc_strdup(rest_ctx, get_http_data(rest_ctx));
+        bearer_token = get_bearer_token(rest_ctx, cli_cred_reply);
+
+        if (cache_path != NULL && bearer_token != NULL) {
+            token_cache_write(cache_path, bearer_token,
+                              parse_expires_in(cli_cred_reply));
+        }
+    }
+have_token:
 
     if (input_type ==TYPE_OBJECT_ID) {
         ret = ENOTSUP;
@@ -841,6 +1107,23 @@ errno_t oidc_get_id(TALLOC_CTX *mem_ctx, enum oidc_cmd oidc_cmd,
         DEBUG(SSSDBG_CRIT_FAILURE, "Unsupported IdP type [%s].\n", idp_type);
         ret = EINVAL;
         goto done;
+    }
+
+    /* If a *cached* token was rejected (HTTP 401 from the IdP),
+     * invalidate the cache file and retry the lookup ONCE with a freshly
+     * minted token. We only retry the cached path — a fresh token that
+     * gets 401'd reflects an actual authorization problem (revoked
+     * credentials / wrong scope), not a stale cache entry. */
+    if (ret == EACCES && used_cached && !retried && cache_path != NULL) {
+        DEBUG(SSSDBG_MINOR_FAILURE,
+              "Cached access_token rejected (HTTP 401); invalidating "
+              "[%s] and retrying with a fresh grant.\n", cache_path);
+        if (unlink(cache_path) != 0 && errno != ENOENT) {
+            DEBUG(SSSDBG_MINOR_FAILURE,
+                  "Token cache unlink failed: %s.\n", strerror(errno));
+        }
+        retried = true;
+        goto acquire_token;
     }
 
 done:

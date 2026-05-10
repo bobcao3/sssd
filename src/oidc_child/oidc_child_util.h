@@ -198,6 +198,7 @@ errno_t oidc_get_id(TALLOC_CTX *mem_ctx, enum oidc_cmd oidc_cmd,
                     bool libcurl_debug, const char *ca_db,
                     const char *client_id, const char *client_secret,
                     const char *private_key_file, const char *private_key_kid,
-                    const char *token_endpoint, const char *scope, char **out);
+                    const char *token_endpoint, const char *scope,
+                    bool no_token_cache, char **out);
 
 #endif /* __OIDC_CHILD_UTIL_H__ */

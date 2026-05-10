@@ -148,6 +148,19 @@ errno_t set_oidc_extra_args(TALLOC_CTX *mem_ctx, struct idp_id_ctx *idp_id_ctx,
         c++;
     }
 
+    /* Pass --no-token-cache to oidc_child when the operator has disabled
+     * the on-disk access_token cache. Default is enabled, so omit the
+     * flag when the option is on (oidc_child caches by default). */
+    if (!dp_opt_get_bool(idp_id_ctx->idp_options, IDP_TOKEN_CACHE_ENABLED)) {
+        extra_args[c] = talloc_asprintf(extra_args, "--no-token-cache");
+        if (extra_args[c] == NULL) {
+            DEBUG(SSSDBG_OP_FAILURE, "talloc_asprintf failed.\n");
+            ret = ENOMEM;
+            goto done;
+        }
+        c++;
+    }
+
     extra_args[c] = NULL;
 
     *oidc_child_extra_args = extra_args;

@@ -294,6 +294,118 @@
                         </para>
                     </listitem>
                 </varlistentry>
+                <varlistentry>
+                    <term>idp_email_uid_enabled (boolean)</term>
+                    <listitem>
+                        <para>
+                            Derive deterministic POSIX UIDs from the local
+                            part of the IdP-side email address by
+                            SHA-256-hashing it into the
+                            [<quote>idp_email_uid_min</quote>,
+                            <quote>idp_email_uid_max</quote>) range.
+                            Intended for IdPs (e.g. Okta) where the
+                            authoritative identity is the email and a
+                            stable per-user UNIX namespace must be
+                            synthesized without round-tripping through
+                            <quote>idmap</quote>.
+                        </para>
+                        <para>
+                            When enabled, users with both an explicit
+                            <quote>UnixUserName</quote> attribute and a
+                            different email-derived local part are stored
+                            twice in the cache: once under the
+                            <quote>UnixUserName</quote> identity (legacy
+                            idmap-hashed UID) and once under the
+                            email-derived identity
+                            (email-hashed UID, <quote>EmailSyncManaged-</quote>
+                            GECOS prefix).
+                        </para>
+                        <para>
+                            Default: true
+                        </para>
+                    </listitem>
+                </varlistentry>
+                <varlistentry>
+                    <term>idp_email_uid_min (integer)</term>
+                    <listitem>
+                        <para>
+                            Lower (inclusive) bound of the POSIX UID range
+                            used by the email-hash UID derivation when
+                            <quote>idp_email_uid_enabled</quote> is true.
+                            Must not overlap with the
+                            <quote>idmap_range_*</quote> range used by the
+                            legacy <quote>UnixUserName</quote> identity
+                            path.
+                        </para>
+                        <para>
+                            Default: 100000
+                        </para>
+                    </listitem>
+                </varlistentry>
+                <varlistentry>
+                    <term>idp_email_uid_max (integer)</term>
+                    <listitem>
+                        <para>
+                            Upper (exclusive) bound of the POSIX UID range
+                            used by the email-hash UID derivation. The
+                            interval must be wide enough that SHA-256
+                            collisions are negligible for the expected
+                            user population (rule of thumb: at least
+                            <emphasis>10×</emphasis> the user count to keep
+                            birthday collisions below 1 per cluster
+                            lifetime).
+                        </para>
+                        <para>
+                            Default: 200000
+                        </para>
+                    </listitem>
+                </varlistentry>
+                <varlistentry>
+                    <term>idp_token_cache_enabled (boolean)</term>
+                    <listitem>
+                        <para>
+                            Cache the OAuth 2.0 client-credentials
+                            <quote>access_token</quote> minted by
+                            <citerefentry>
+                                <refentrytitle>oidc_child</refentrytitle>
+                                <manvolnum>8</manvolnum>
+                            </citerefentry> on tmpfs at
+                            <filename>/run/sssd/oidc_token_&lt;sha256&gt;.json</filename>
+                            so subsequent <command>oidc_child</command>
+                            forks can reuse it instead of re-minting per
+                            invocation. The cache key is
+                            <emphasis>sha256(client_id |
+                            token_endpoint | scope)</emphasis>; readers
+                            take a shared <function>flock</function>(LOCK_SH);
+                            writers go through a per-PID temp file plus
+                            atomic <function>rename</function>(2). The
+                            cached entry honors the IdP-supplied
+                            <quote>expires_in</quote> with a 60-second
+                            skew buffer.
+                        </para>
+                        <para>
+                            On HTTP 401 from the IdP user / group
+                            endpoints (token revoked, scope changed,
+                            etc.) the cache file is unlinked and the
+                            current request is retried once with a
+                            freshly-minted token. A 401 against a fresh
+                            token is propagated as
+                            <errorcode>EACCES</errorcode>.
+                        </para>
+                        <para>
+                            Disabling this option causes
+                            <command>oidc_child</command> to be invoked
+                            with <option>--no-token-cache</option>, which
+                            forces a new token-endpoint round-trip on
+                            every backend request (typically adds
+                            ~150&#xA0;ms per <command>oidc_child</command>
+                            fork on top of the lookup itself).
+                        </para>
+                        <para>
+                            Default: true
+                        </para>
+                    </listitem>
+                </varlistentry>
             </variablelist>
         </para>
     </refsect1>

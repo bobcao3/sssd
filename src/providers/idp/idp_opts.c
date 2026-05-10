@@ -45,5 +45,6 @@ struct dp_option default_idp_opts[] = {
     { "idp_email_uid_enabled", DP_OPT_BOOL, BOOL_TRUE, BOOL_TRUE },
     { "idp_email_uid_min", DP_OPT_NUMBER, { .number = 100000 }, NULL_NUMBER },
     { "idp_email_uid_max", DP_OPT_NUMBER, { .number = 200000 }, NULL_NUMBER },
+    { "idp_token_cache_enabled", DP_OPT_BOOL, BOOL_TRUE, BOOL_TRUE },
     DP_OPTION_TERMINATOR
 };

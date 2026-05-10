@@ -53,6 +53,8 @@ enum idp_opts {
     IDP_EMAIL_UID_ENABLED,     // bool, default true
     IDP_EMAIL_UID_MIN,         // int, default 100000
     IDP_EMAIL_UID_MAX,         // int, default 200000
+    IDP_TOKEN_CACHE_ENABLED,   // bool, default true; cache oauth2 access_token
+                               // on tmpfs at /run/sssd/oidc_token_*.json
 
     IDP_OPTS
 };

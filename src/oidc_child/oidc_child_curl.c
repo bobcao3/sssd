@@ -423,7 +423,10 @@ static errno_t do_http_request_ext(struct rest_ctx *rest_ctx, const char *uri,
                                  resp_code);
         DEBUG(SSSDBG_OP_FAILURE, "Error response body: [%s].\n",
                                  get_http_data(rest_ctx));
-        ret = EIO;
+        /* 401 = bearer rejected (token revoked / expired / wrong scope).
+         * Distinct return code so the caller can invalidate the on-disk
+         * token cache and retry with a fresh grant. Other non-200s stay EIO. */
+        ret = (resp_code == 401) ? EACCES : EIO;
         goto done;
     }
 
@@ -489,7 +492,10 @@ errno_t do_http_request(struct rest_ctx *rest_ctx, const char *uri,
                                  resp_code);
         DEBUG(SSSDBG_OP_FAILURE, "Error response body: [%s].\n",
                                  get_http_data(rest_ctx));
-        ret = EIO;
+        /* 401 = bearer rejected (token revoked / expired / wrong scope).
+         * Distinct return code so the caller can invalidate the on-disk
+         * token cache and retry with a fresh grant. Other non-200s stay EIO. */
+        ret = (resp_code == 401) ? EACCES : EIO;
         goto done;
     }
 

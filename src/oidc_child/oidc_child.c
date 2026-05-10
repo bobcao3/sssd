@@ -350,6 +350,7 @@ struct cli_opts {
     char *ca_db;
     char *user_identifier_attr;
     bool libcurl_debug;
+    bool no_token_cache;
     enum oidc_cmd oidc_cmd;
     enum search_str_type search_str_type;
     char *search_str;
@@ -436,6 +437,9 @@ static int parse_cli(int argc, const char *argv[], struct cli_opts *opts)
                 _("Path to PEM file with CA certificates"), NULL},
         {"libcurl-debug", 0, POPT_ARG_NONE, NULL, 'c',
                 _("Enable libcurl debug output"), NULL},
+        {"no-token-cache", 0, POPT_ARG_NONE, NULL, 'T',
+                _("Disable on-disk access_token cache (/run/sssd/oidc_token_*)"),
+                NULL},
         POPT_TABLEEND
     };
 
@@ -451,6 +455,9 @@ static int parse_cli(int argc, const char *argv[], struct cli_opts *opts)
         switch(opt) {
         case 'c':
             opts->libcurl_debug = true;
+            break;
+        case 'T':
+            opts->no_token_cache = true;
             break;
         case 's':
             opts->client_secret_stdin = true;
@@ -658,7 +665,8 @@ int main(int argc, const char *argv[])
                           opts.libcurl_debug, opts.ca_db,
                           opts.client_id, opts.client_secret,
                           opts.private_key_file, opts.private_key_kid,
-                          opts.token_endpoint, opts.scope, &out);
+                          opts.token_endpoint, opts.scope,
+                          opts.no_token_cache, &out);
         if (ret != EOK) {
             DEBUG(SSSDBG_OP_FAILURE, "Id lookup failed.\n");
             goto done;
