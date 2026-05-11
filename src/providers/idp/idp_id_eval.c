@@ -99,11 +99,14 @@ static uid_t email_hash_to_uid(const char *email, uint32_t min_uid,
 
 /**
  * Check for UID/name collisions in sysdb before storing.
+ * `fqname` must be the fully-qualified name (matches what sysdb_store_user
+ * persists as SYSDB_NAME); passing a short name produces a self-collision
+ * against the user's own prior cache entry.
  * Returns EOK if safe, EEXIST if collision detected (skip this entry).
  */
 static errno_t check_collision(TALLOC_CTX *mem_ctx,
                                 struct sss_domain_info *dom,
-                                const char *username, uid_t uid)
+                                const char *fqname, uid_t uid)
 {
     errno_t ret;
     struct ldb_result *res = NULL;
@@ -114,11 +117,11 @@ static errno_t check_collision(TALLOC_CTX *mem_ctx,
         const char *existing_name = ldb_msg_find_attr_as_string(
             res->msgs[0], SYSDB_NAME, NULL);
         if (existing_name != NULL &&
-            strcmp(existing_name, username) != 0) {
+            strcmp(existing_name, fqname) != 0) {
             DEBUG(SSSDBG_OP_FAILURE,
                   "UID COLLISION: uid %u already assigned to %s, "
                   "cannot assign to %s\n",
-                  uid, existing_name, username);
+                  uid, existing_name, fqname);
             talloc_free(res);
             return EEXIST;
         }
@@ -127,7 +130,7 @@ static errno_t check_collision(TALLOC_CTX *mem_ctx,
     res = NULL;
 
     /* Check 2: existing user with same name but different UID */
-    ret = sysdb_getpwnam(mem_ctx, dom, username, &res);
+    ret = sysdb_getpwnam(mem_ctx, dom, fqname, &res);
     if (ret == EOK && res != NULL && res->count > 0) {
         uid_t existing_uid = (uid_t)ldb_msg_find_attr_as_uint64(
             res->msgs[0], SYSDB_UIDNUM, 0);
@@ -135,7 +138,7 @@ static errno_t check_collision(TALLOC_CTX *mem_ctx,
             DEBUG(SSSDBG_OP_FAILURE,
                   "NAME COLLISION: %s already has uid %u, "
                   "cannot assign uid %u\n",
-                  username, existing_uid, uid);
+                  fqname, existing_uid, uid);
             talloc_free(res);
             return EEXIST;
         }
@@ -281,7 +284,7 @@ static errno_t store_json_user(struct idp_id_ctx *idp_id_ctx, json_t *user,
     }
 
     /* Collision detection */
-    ret = check_collision(idp_id_ctx, dom, json_string_value(user_name), uid);
+    ret = check_collision(idp_id_ctx, dom, fqdn, uid);
     if (ret == EEXIST) {
         /* Skip this user (parity with okta-sync-email.py) */
         DEBUG(SSSDBG_MINOR_FAILURE,
@@ -365,9 +368,7 @@ static errno_t store_json_user(struct idp_id_ctx *idp_id_ctx, json_t *user,
             goto done;
         }
 
-        ret = check_collision(idp_id_ctx, dom,
-                              json_string_value(email_user_name_json),
-                              email_uid);
+        ret = check_collision(idp_id_ctx, dom, email_fqdn, email_uid);
         if (ret == EEXIST) {
             DEBUG(SSSDBG_MINOR_FAILURE,
                   "Collision for email account [%s] uid %u, skipping.\n",
