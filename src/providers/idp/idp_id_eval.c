@@ -332,12 +332,18 @@ static errno_t store_json_user(struct idp_id_ctx *idp_id_ctx, json_t *user,
     if (group_name != NULL) {
         ret = sysdb_add_group_member(dom, group_name, fqdn, SYSDB_MEMBER_USER,
                                      false);
-            if (ret != EOK) {
-                DEBUG(SSSDBG_OP_FAILURE,
-                      "Failed to store user [%s] as member of group [%s].\n",
-                      fqdn, group_name);
-                goto done;
-            }
+        if (ret == EEXIST) {
+            /* User is already a member of the group (multi-valued
+             * 'member' attribute already contains this DN). The sysdb
+             * layer surfaces LDB_ERR_ATTRIBUTE_OR_VALUE_EXISTS as EEXIST;
+             * treat it as success so the rest of the store completes. */
+            ret = EOK;
+        } else if (ret != EOK) {
+            DEBUG(SSSDBG_OP_FAILURE,
+                  "Failed to store user [%s] as member of group [%s].\n",
+                  fqdn, group_name);
+            goto done;
+        }
     }
 
     /* Dual-account: if posixEmailUsername differs from posixUsername,
@@ -427,7 +433,11 @@ static errno_t store_json_user(struct idp_id_ctx *idp_id_ctx, json_t *user,
         if (group_name != NULL) {
             ret = sysdb_add_group_member(dom, group_name, email_fqdn,
                                          SYSDB_MEMBER_USER, false);
-            if (ret != EOK) {
+            if (ret == EEXIST) {
+                /* Email account already a member; see note on the
+                 * posix-user store above. */
+                ret = EOK;
+            } else if (ret != EOK) {
                 DEBUG(SSSDBG_OP_FAILURE,
                       "Failed to add email account [%s] to group [%s].\n",
                       email_fqdn, group_name);
@@ -543,7 +553,11 @@ static errno_t store_json_group(struct idp_id_ctx *idp_id_ctx, json_t *group,
 
         ret = sysdb_add_group_member(dom, fqdn, user_name, SYSDB_MEMBER_USER,
                                      false);
-        if (ret != EOK) {
+        if (ret == EEXIST) {
+            /* User already a member of this group; see note on the
+             * posix-user store in store_json_user above. */
+            ret = EOK;
+        } else if (ret != EOK) {
             DEBUG(SSSDBG_OP_FAILURE,
                   "Failed to store user [%s] as member of group [%s].\n",
                   user_name, fqdn);
